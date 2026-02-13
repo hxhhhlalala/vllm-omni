@@ -380,6 +380,28 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
             },
         )
 
+        # OMNI: When use_audio_in_video=True, the upstream renderer does not
+        # extract audio from video.  We do it here after rendering so that the
+        # audio data is present in multi_modal_data before the engine processes
+        # the request.
+        mm_proc_kw = getattr(request, "mm_processor_kwargs", None) or {}
+        if mm_proc_kw.get("use_audio_in_video", False) and isinstance(engine_prompt, dict):
+            mm_data = engine_prompt.get("multi_modal_data")
+            if mm_data is not None and "video" in mm_data and "audio" not in mm_data:
+                from vllm_omni.entrypoints.chat_utils import extract_audio_from_video_async
+
+                video_urls: list[str] = []
+                for msg in messages:
+                    for part in msg.get("content") or []:
+                        if isinstance(part, dict) and part.get("type") == "video_url":
+                            url = part.get("video_url", {}).get("url")
+                            if url:
+                                video_urls.append(url)
+
+                if video_urls:
+                    audios = await asyncio.gather(*(extract_audio_from_video_async(u) for u in video_urls))
+                    engine_prompt.setdefault("multi_modal_data", {})["audio"] = list(audios)
+
         tokenizer = renderer.get_tokenizer()
 
         # tool parsing is done only if a tool_parser has been set and if
