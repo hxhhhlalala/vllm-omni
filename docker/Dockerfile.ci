@@ -20,22 +20,11 @@ RUN apt-get update && \
 # causing it to fall back to the older stable release from PyPI.
 RUN uv pip install --system --upgrade --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/2d5be1dd5ce2e44dfea53ea03ff61143da5137eb
 
-# # Keep flashinfer runtime packages in version sync.
-# # We derive the version from installed flashinfer (pulled by vllm)
-# # and enforce the same version for flashinfer-cubin / flashinfer-jit-cache.
-# RUN FLASHINFER_VERSION="$(python3 -c 'import importlib.metadata as m; print(m.version("flashinfer-python"))' 2>/dev/null || python3 -c 'import importlib.metadata as m; print(m.version("flashinfer"))')" && \
-#     FLASHINFER_CUDA_TAG="$(python3 -c 'import torch; print((torch.version.cuda or "12.4").replace(".", ""))')" && \
-#     uv pip install --system --upgrade --force-reinstall \
-#       "flashinfer-cubin==${FLASHINFER_VERSION}" \
-#       "flashinfer-jit-cache==${FLASHINFER_VERSION}" \
-#       --extra-index-url "https://flashinfer.ai/whl/cu${FLASHINFER_CUDA_TAG}" && \
-#     flashinfer show-config
-# Uninstall the old nvidia-cublas-cu12 brought by torch/vllm before reinstalling the pinned version
+
 RUN uv pip uninstall --system nvidia-cublas-cu12
 # Install vllm-omni into the same uv-managed Python environment used by the base image.
 # Use bash -c so that $(python3 -c ...) is expanded inside the container.
-RUN /bin/bash -c 'VLLM_USE_PRECOMPILED=1 uv pip install --python "$(python3 -c "import sys; print(sys.executable)")" --no-cache-dir -e ".[dev]"'
-
+RUN uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" --no-cache-dir ".[dev]"
 
 RUN /bin/bash -c 'FLASHINFER_CUDA_TAG="$(python3 -c "import torch; print((torch.version.cuda or \"12.4\").replace(\".\", \"\"))")" && \
     uv pip install --system --upgrade --force-reinstall \

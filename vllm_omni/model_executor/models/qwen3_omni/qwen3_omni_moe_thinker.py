@@ -803,7 +803,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 mm_input_by_modality["image"] = self._parse_and_validate_image_input(**kwargs)
             if input_key in ("pixel_values_videos", "video_embeds") and "video" not in mm_input_by_modality:
                 mm_input_by_modality["video"] = self._parse_and_validate_video_input(**kwargs)
-            if input_key in ("input_audio_features") and "audio" not in mm_input_by_modality:
+            if input_key in ("input_audio_features",) and "audio" not in mm_input_by_modality:
                 mm_input_by_modality["audio"] = self._parse_and_validate_audio_input(**kwargs)
         return mm_input_by_modality
 
