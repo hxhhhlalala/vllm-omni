@@ -14,11 +14,11 @@ RUN apt-get update && \
 
 # Install vLLM wheel for the specific commit
 # URL format: https://wheels.vllm.ai/<commit_hash>/
-# Current vLLM wheel commit: 6042e66cd5304fc043d96aaa0c22d56f939af320
+# Current vLLM wheel commit: a60985b07eaf0fefa4c353ad2309b745707591ed
 # Note: --prerelease=allow is required because nightly/commit wheels use
 # pre-release version numbers (e.g. 2.10.0.dev...) which uv ignores by default,
 # causing it to fall back to the older stable release from PyPI.
-RUN uv pip install --system --upgrade --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/6042e66cd5304fc043d96aaa0c22d56f939af320
+RUN uv pip install --system --upgrade --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/a60985b07eaf0fefa4c353ad2309b745707591ed
 
 RUN uv pip uninstall --system nvidia-cublas-cu12
 # Install vllm-omni into the same uv-managed Python environment used by the base image.

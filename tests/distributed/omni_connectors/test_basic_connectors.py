@@ -86,7 +86,7 @@ def test_put_get_shm(mocker: MockerFixture, shm_connector, monkeypatch: pytest.M
     data = {"large": "x" * 200}
 
     # Mock SHM return values
-    mock_handle = {"name": "test_shm", "size": 200}
+    mock_handle = {"name": "req_2", "size": 200}
     mock_write = mocker.MagicMock(return_value=mock_handle)
     monkeypatch.setattr("vllm_omni.distributed.omni_connectors.connectors.shm_connector.shm_write_bytes", mock_write)
 
