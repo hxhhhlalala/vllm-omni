@@ -14,7 +14,7 @@ RUN apt-get update && \
 
 # Install vLLM wheel for the specific commit
 # URL format: https://wheels.vllm.ai/<commit_hash>/
-# Current vLLM wheel commit: 097eb544e9a22810c9b7a59e586b61627b308362 (main)
+# Current vLLM wheel commit: b31e9326a7d9394aab8c767f8ebe225c65594b60 (releases/v0.17.0)
 # Note: --prerelease=allow is required because nightly/commit wheels use
 # pre-release version numbers (e.g. 2.10.0.dev...) which uv ignores by default,
 # causing it to fall back to the older stable release from PyPI.
