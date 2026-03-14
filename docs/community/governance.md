@@ -39,7 +39,7 @@ Committers have write access and merge rights. They typically have deep expertis
 - [@linyueqian](https://github.com/linyueqian)
 - [@princepride](https://github.com/princepride)
 - [@SamitHuang](https://github.com/SamitHuang)
-- [@tzhouam](https://github.com/tzhouam)
+- [@tzhouam](https://github.com/tzhouam): Engine and New Model Support
 - [@wtomin](https://github.com/wtomin)
 - [@ZJY0516](https://github.com/ZJY0516)
 
