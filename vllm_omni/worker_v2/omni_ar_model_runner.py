@@ -138,10 +138,14 @@ class OmniARModelRunner(OmniGPUModelRunner):
             num_rejected,
         )
 
+        token_ids_cpu = sampler_output.sampled_token_ids
+        if isinstance(token_ids_cpu, torch.Tensor):
+            token_ids_cpu = token_ids_cpu.tolist()
+
         output = OmniModelRunnerOutput(
             req_ids=input_batch.req_ids,
             req_id_to_index={rid: i for i, rid in enumerate(input_batch.req_ids)},
-            sampled_token_ids=sampler_output.sampled_token_ids,
+            sampled_token_ids=token_ids_cpu,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=pooler_output,
             kv_connector_output=kv_connector_output,

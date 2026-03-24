@@ -115,7 +115,11 @@ class OmniModelState(DefaultModelState):
         Handles ``OmniOutput`` unwrapping and ``make_omni_output``
         conversion, then dispatches to registered plugins.
         """
-        if not isinstance(model_output, OmniOutput) and hasattr(self.model, "make_omni_output"):
+        if (
+            not isinstance(model_output, OmniOutput)
+            and isinstance(model_output, (list, tuple))
+            and hasattr(self.model, "make_omni_output")
+        ):
             buffer_list = self.intermediate_buffer.gather(input_batch)
             model_output = self.model.make_omni_output(
                 model_output,
