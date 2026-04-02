@@ -47,10 +47,8 @@ def register_omni_models_to_vllm():
 
     _register_omni_hf_configs()
 
-    supported_archs = ModelRegistry.get_supported_archs()
     for arch, (mod_folder, mod_relname, cls_name) in _OMNI_MODELS.items():
-        if arch not in supported_archs:
-            ModelRegistry.register_model(arch, f"vllm_omni.model_executor.models.{mod_folder}.{mod_relname}:{cls_name}")
+        ModelRegistry.register_model(arch, f"vllm_omni.model_executor.models.{mod_folder}.{mod_relname}:{cls_name}")
 
 
 @dataclass

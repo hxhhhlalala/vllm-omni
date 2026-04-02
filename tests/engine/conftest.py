@@ -30,10 +30,20 @@ def _make_dummy_hf_config(model, *args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
-def _skip_offline_model_resolution(monkeypatch):
+def _skip_offline_model_resolution(request, monkeypatch):
     """Prevent EngineArgs from resolving model paths or loading HF configs
     via network / local snapshot.  These unit tests only exercise
-    config-creation logic and never need real weights on disk."""
+    config-creation logic and never need real weights on disk.
+
+    Tests that need real HF configs (e.g. integration tests that load
+    actual model weights) can opt out by using the ``real_hf_config``
+    marker::
+
+        @pytest.mark.real_hf_config
+        def test_my_integration_test(): ...
+    """
+    if request.node.get_closest_marker("real_hf_config"):
+        return
 
     def _passthrough(model, revision=None):
         return model
