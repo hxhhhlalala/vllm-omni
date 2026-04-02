@@ -37,6 +37,9 @@ elif current_omni_platform.is_xpu():
         flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func
     except (ImportError, ModuleNotFoundError):
         pass
+elif current_omni_platform.is_musa():
+    # XXX (MUSA): Add MUSA-specific Flash Attention when available
+    pass
 else:
     # CUDA: try FA3 -> FA2 fallback chain
     # Try FA3 from fa3-fwd PyPI package
