@@ -23,16 +23,16 @@ echo "$REVIEW_JSON" | jq -c '.comments[]' | while read -r comment; do
   FILE=$(echo "$comment" | jq -r '.path')
   LINE=$(echo "$comment" | jq -r '.line')
   BODY=$(echo "$comment" | jq -r '.body[:60]')
-  
+
   # Extract the file's diff
   FILE_DIFF=$(echo "$DIFF" | sed -n "/^diff --git a\/${FILE//\//\/}/,/^diff --git/p" | head -n -1)
-  
+
   if [ -z "$FILE_DIFF" ]; then
     echo "ERROR: File not in diff: ${FILE}" >&2
     ERRORS=$((ERRORS + 1))
     continue
   fi
-  
+
   # Check if the line falls within any hunk
   IN_HUNK=false
   while IFS= read -r hunk_header; do
@@ -40,13 +40,13 @@ echo "$REVIEW_JSON" | jq -c '.comments[]' | while read -r comment; do
     NEW_START=$(echo "$hunk_header" | grep -oP '\+\K[0-9]+')
     NEW_COUNT=$(echo "$hunk_header" | grep -oP '\+[0-9]+,\K[0-9]+' || echo "1")
     NEW_END=$((NEW_START + NEW_COUNT - 1))
-    
+
     if [ "$LINE" -ge "$NEW_START" ] && [ "$LINE" -le "$NEW_END" ]; then
       IN_HUNK=true
       break
     fi
   done < <(echo "$FILE_DIFF" | grep '^@@')
-  
+
   if [ "$IN_HUNK" = false ]; then
     echo "ERROR: Line ${LINE} in ${FILE} is outside all diff hunks" >&2
     echo "  Comment: ${BODY}..." >&2

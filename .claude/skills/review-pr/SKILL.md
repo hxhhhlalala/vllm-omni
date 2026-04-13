@@ -56,7 +56,7 @@ Always run the blocker scan. Under context pressure, do a shallow scan of the mo
 
 ## Core Workflow
 
-Check whether this PR is still a draft or WIP in the PR title, if so, end the review process. 
+Check whether this PR is still a draft or WIP in the PR title, if so, end the review process.
 
 
 ### Step 0: Verify Review Gates First

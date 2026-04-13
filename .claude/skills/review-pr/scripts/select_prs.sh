@@ -54,10 +54,10 @@ echo "Checking review status for $(echo "$FILTERED" | jq length) PRs..." >&2
 
 echo "$FILTERED" | jq -c '.[]' | while read -r pr; do
   NUM=$(echo "$pr" | jq -r '.number')
-  
+
   # Get review count
   REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${NUM}/reviews" --jq 'length' 2>/dev/null || echo "0")
-  
+
   # Check if reviewer already reviewed
   if [ -n "$REVIEWER" ]; then
     ALREADY=$(gh api "repos/${REPO}/pulls/${NUM}/reviews" \
@@ -66,6 +66,6 @@ echo "$FILTERED" | jq -c '.[]' | while read -r pr; do
       continue
     fi
   fi
-  
+
   echo "$pr" | jq --argjson rc "$REVIEW_COUNT" '. + {reviewCount: $rc}'
 done | jq -s "sort_by(.reviewCount) | .[:${LIMIT}]"

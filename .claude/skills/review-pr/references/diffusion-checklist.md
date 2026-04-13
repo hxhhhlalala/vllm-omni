@@ -115,9 +115,9 @@ curl -s http://localhost:8091/v1/chat/completions \
 
 ### Performance Measurements
 
-**Hardware:** 1× NVIDIA A100 80GB  
-**Resolution:** 1024×1024  
-**Steps:** 50  
+**Hardware:** 1× NVIDIA A100 80GB
+**Resolution:** 1024×1024
+**Steps:** 50
 
 | Metric | Value |
 |--------|-------|

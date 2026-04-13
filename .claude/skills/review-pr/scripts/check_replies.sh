@@ -39,11 +39,11 @@ for PR_NUM in $REVIEWED_PRS; do
   # Get all review comments on this PR
   COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUM}/comments" \
     --jq '[.[] | {id, user: .user.login, body: .body[:100], in_reply_to_id, created_at, path, url: .html_url}]' 2>/dev/null)
-  
+
   # Find threads: reviewer's comments that got a reply, but reviewer didn't reply back
   # 1. Get reviewer's comment IDs
   REVIEWER_IDS=$(echo "$COMMENTS" | jq -r --arg r "$REVIEWER" '[.[] | select(.user == $r) | .id]')
-  
+
   # 2. Find replies to reviewer's comments (from others)
   REPLIES=$(echo "$COMMENTS" | jq -c --arg r "$REVIEWER" --argjson rids "$REVIEWER_IDS" '
     [.[] |
@@ -52,24 +52,24 @@ for PR_NUM in $REVIEWED_PRS; do
       select([.in_reply_to_id] | inside($rids))
     ]
   ')
-  
+
   REPLY_COUNT=$(echo "$REPLIES" | jq 'length')
   if [ "$REPLY_COUNT" -eq 0 ]; then
     continue
   fi
-  
+
   # 3. For each reply, check if reviewer replied after it
   echo "$REPLIES" | jq -c '.[]' | while read -r reply; do
     REPLY_ID=$(echo "$reply" | jq -r '.id')
     REPLY_DATE=$(echo "$reply" | jq -r '.created_at')
     REPLY_USER=$(echo "$reply" | jq -r '.user')
     REPLY_URL=$(echo "$reply" | jq -r '.url')
-    
+
     # Check if reviewer replied after this reply
     FOLLOWUP=$(echo "$COMMENTS" | jq --arg r "$REVIEWER" --arg date "$REPLY_DATE" --argjson rid "$REPLY_ID" '
       [.[] | select(.user == $r) | select(.in_reply_to_id == $rid) | select(.created_at > $date)] | length
     ')
-    
+
     if [ "$FOLLOWUP" -eq 0 ]; then
       REPLY_BODY=$(echo "$reply" | jq -r '.body')
       echo "PR #${PR_NUM} | @${REPLY_USER} replied | ${REPLY_URL}"
