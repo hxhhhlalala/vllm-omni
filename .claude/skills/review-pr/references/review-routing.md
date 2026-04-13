@@ -17,7 +17,7 @@ Use this file when the main review skill needs help deciding which domain skill,
 | `[API]` | `vllm-omni-api` | OpenAI compatibility, request validation, response behavior |
 | `[CI]` | `vllm-omni-cicd` | Pipeline correctness, deployment safety |
 | `[Model]` | `vllm-omni-contrib` | Model integration patterns, tests, config wiring |
-| `[Bug]`, `[Bugfix]` | none by default | Load [bug-test-coverage.md](bug-test-coverage.md) for regression reproduction and test coverage |
+| `[Bug]`, `[Bugfix]` | none by default | Use [tests-docs-checklist.md](tests-docs-checklist.md) for regression and coverage evidence |
 | `[Refactor]` | none by default | Behavior preservation and invariant drift |
 | `[Feature]` | none by default | Acceptance criteria, docs, tests |
 
