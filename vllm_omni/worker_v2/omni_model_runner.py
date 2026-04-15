@@ -30,6 +30,7 @@ from vllm.v1.worker.gpu.model_runner import (
     get_uniform_token_count,
 )
 
+from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.worker_v2.model_states import init_omni_model_state
 from vllm_omni.worker_v2.model_states.omni_model_state import OmniModelState
 
@@ -65,6 +66,12 @@ class OmniGPUModelRunner(GPUModelRunner):
         # FULL graph replay bypasses Python entirely — only PIECEWISE
         # is safe for these models.
         self._exclude_full_graph = self._model_returns_tuple or hasattr(self.model, "_last_captured_layers")
+
+        # Preprocess models get embeddings via run_preprocess(), not
+        # encoder_runner (whose buffer size would mismatch).
+        if getattr(self.model, "has_preprocess", False) and self.supports_mm_inputs:
+            self.supports_mm_inputs = False
+            self.encoder_cache = None
 
     # ------------------------------------------------------------------
     # CUDA Graph: conditionally exclude FULL mode
@@ -265,26 +272,16 @@ class OmniGPUModelRunner(GPUModelRunner):
                 self.kv_connector.pre_forward(scheduler_output)
                 model_output = self.model(**model_inputs)
 
-            # ★ TUPLE INTERCEPT: handle models that return (hidden, aux_dict).
-            # torch.compile may prevent in-model side-effects like
-            # self._last_captured_layers = ... from taking effect,
-            # so the tuple may surface here even when the model tries to
-            # store captured layers internally.
-            if isinstance(model_output, tuple) and len(model_output) == 2:
-                first, second = model_output
-                if isinstance(first, torch.Tensor):
-                    self._last_aux_output = second
-                    # Store captured layers on the model so
-                    # make_omni_output can retrieve them.
-                    if hasattr(self.model, "_last_captured_layers"):
-                        self.model._last_captured_layers = second
-                    hidden_states = first
-                else:
-                    self._last_aux_output = None
-                    hidden_states = model_output
+            # Extract hidden_states from model output.
+            self._last_aux_output = None
+            if isinstance(model_output, OmniOutput):
+                hidden_states = model_output.text_hidden_states
+            elif isinstance(model_output, tuple) and len(model_output) == 2:
+                hidden_states, self._last_aux_output = model_output
+                if hasattr(self.model, "_last_captured_layers"):
+                    self.model._last_captured_layers = self._last_aux_output
             else:
-                self._last_aux_output = None
-                hidden_states = model_output
+                raise TypeError(f"Unexpected model output type: {type(model_output)}")
 
         # ★ POST-FORWARD: per-request postprocess
         if not dummy_run and isinstance(hidden_states, torch.Tensor):
