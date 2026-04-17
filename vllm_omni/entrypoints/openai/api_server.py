@@ -1426,6 +1426,9 @@ async def edit_images(
     background: str | None = Form("auto"),
     output_compression: Annotated[int, Form(ge=0, le=100)] = 100,
     user: str | None = Form(None),  # unused now
+    # vllm-omni extensions for image editing
+    mask_image: str | UploadFile | None = None,
+    reference_image: str | UploadFile | None = None,
     # vllm-omni extensions for diffusion control
     negative_prompt: str | None = Form(None),
     num_inference_steps: int | None = Form(None),
@@ -1478,6 +1481,14 @@ async def edit_images(
             )
         prompt["multi_modal_data"] = {}
         prompt["multi_modal_data"]["image"] = pil_images
+
+        if mask_image is not None:
+            loaded = await _load_input_images([mask_image])
+            prompt["multi_modal_data"]["mask_image"] = loaded[0]
+
+        if reference_image is not None:
+            loaded = await _load_input_images([reference_image])
+            prompt["multi_modal_data"]["reference_image"] = loaded[0]
 
         # 3 Build sample params
         gen_params = OmniDiffusionSamplingParams()
@@ -2075,6 +2086,10 @@ async def _parse_video_form(
     true_cfg_scale: float | None = Form(default=None),
     seed: int | None = Form(default=None),
     negative_prompt: str | None = Form(default=None),
+    enable_frame_interpolation: bool = Form(default=False),
+    frame_interpolation_exp: int = Form(default=1, ge=1),
+    frame_interpolation_scale: float = Form(default=1.0, gt=0.0),
+    frame_interpolation_model_path: str | None = Form(default=None),
     lora: str | None = Form(default=None),
     extra_params: str | None = Form(default=None),
 ) -> tuple[VideoGenerationRequest, "OmniOpenAIServingVideo", str, ReferenceImage | None]:
@@ -2111,6 +2126,10 @@ async def _parse_video_form(
         "true_cfg_scale": true_cfg_scale,
         "seed": seed,
         "negative_prompt": negative_prompt,
+        "enable_frame_interpolation": enable_frame_interpolation,
+        "frame_interpolation_exp": frame_interpolation_exp,
+        "frame_interpolation_scale": frame_interpolation_scale,
+        "frame_interpolation_model_path": frame_interpolation_model_path,
         "lora": _parse_form_json(lora, expected_type=dict),
         "extra_params": _parse_form_json(extra_params, expected_type=dict),
     }
