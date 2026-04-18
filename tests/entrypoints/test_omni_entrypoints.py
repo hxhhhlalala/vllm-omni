@@ -376,8 +376,10 @@ def test_openai_serving_models_can_consume_async_omni_compat_attrs():
 
     assert serving_models.model_config is model_config
     assert serving_models.renderer is renderer
-    assert serving_models.io_processor is io_processor
     assert serving_models.input_processor is input_processor
+    # OpenAIServingModels upstream does not copy io_processor onto itself; it
+    # retains engine_client, which AsyncOmni populates with io_processor.
+    assert serving_models.engine_client.io_processor is io_processor
 
 
 def test_get_diffusion_od_config_returns_diffusion_stage_config():

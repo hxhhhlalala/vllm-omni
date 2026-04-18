@@ -1172,7 +1172,7 @@ class TestCreateRemoteLlmStage:
 
         @contextmanager
         def fake_connect_cm(*args, **kwargs):
-            yield eng_mgr, coordinator, fake_addresses
+            yield eng_mgr, coordinator, fake_addresses, None
 
         mocker.patch(
             "vllm_omni.engine.async_omni_engine.build_engine_args_dict",
@@ -1232,7 +1232,7 @@ class TestCreateRemoteLlmStage:
 
         @contextmanager
         def fake_connect_cm(*args, **kwargs):
-            yield mocker.Mock(), mocker.Mock(), fake_addresses
+            yield mocker.Mock(), mocker.Mock(), fake_addresses, None
 
         mocker.patch(
             "vllm_omni.engine.async_omni_engine.build_engine_args_dict",
@@ -1296,7 +1296,7 @@ class TestCreateRemoteLlmStage:
 
         @contextmanager
         def boom(*args, **kwargs):
-            yield mocker.Mock(), mocker.Mock(), mocker.Mock()
+            yield mocker.Mock(), mocker.Mock(), mocker.Mock(), None
             raise RuntimeError("handshake failed")
 
         mocker.patch(
@@ -1369,7 +1369,7 @@ class TestConnectRemoteEngineCoresCoordinator:
             vllm_config=vllm_config,
             omni_master_server=omni_master_server,
             stage_id=7,
-        ) as (_, yielded_coordinator, yielded_addresses):
+        ) as (_, yielded_coordinator, yielded_addresses, _tensor_queue):
             assert yielded_coordinator is None
             assert yielded_addresses.coordinator_input == "tcp://coord-in"
             assert yielded_addresses.coordinator_output == "tcp://coord-out"
@@ -1406,7 +1406,7 @@ class TestConnectRemoteEngineCoresCoordinator:
             vllm_config=vllm_config,
             omni_master_server=omni_master_server,
             stage_id=7,
-        ) as (_, yielded_coordinator, yielded_addresses):
+        ) as (_, yielded_coordinator, yielded_addresses, _tensor_queue):
             assert yielded_coordinator is None
             assert yielded_addresses.coordinator_input is None
             assert yielded_addresses.coordinator_output is None
