@@ -1,13 +1,16 @@
 # Community Recipes
 
-This directory contains community-maintained recipe templates for answering a
+This directory contains community-maintained recipes for answering a
 practical user question:
 
 > How do I run model X on hardware Y for task Z?
 
-We suggest organizing recipes by model vendor, aligned with
-[`vllm-project/recipes`](https://github.com/vllm-project/recipes), and using
-one Markdown file per model family by default.
+Add recipes for this repository under this in-repo `recipes/` directory. To
+keep naming and layout consistent, organize recipes by model vendor in a way
+that is aligned with
+[`vllm-project/recipes`](https://github.com/vllm-project/recipes), but treat
+that external repository as a reference for structure rather than the place to
+add files for this repo. Use one Markdown file per model family by default.
 
 Example layout:
 
