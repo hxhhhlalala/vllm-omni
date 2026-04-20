@@ -445,13 +445,22 @@ def _wait_for_omni_engine_startup(
             logger.debug("[omni] HELLO from engine %d", eng_index)
 
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
-            num_gpu_blocks = (cache_config.num_gpu_blocks or 0) + msg["num_gpu_blocks"]
-            cache_config.num_gpu_blocks = num_gpu_blocks
+            # Upstream vllm >=0.19 dropped `num_gpu_blocks` from the READY
+            # handshake payload (the field is now communicated out-of-band via
+            # stats/health topics); tolerate both legacy and new message
+            # shapes so the omni handshake keeps working across rebases.
+            reported_blocks = msg.get("num_gpu_blocks")
+            if reported_blocks is not None:
+                cache_config.num_gpu_blocks = (cache_config.num_gpu_blocks or 0) + int(reported_blocks)
             if engine_addresses.frontend_stats_publish_address is None:
                 engine_addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
             start_pending -= 1
             engine.state = CoreEngineState.READY
-            logger.debug("[omni] READY from engine %d (num_gpu_blocks=%d)", eng_index, msg["num_gpu_blocks"])
+            logger.debug(
+                "[omni] READY from engine %d (num_gpu_blocks=%s)",
+                eng_index,
+                "unknown" if reported_blocks is None else reported_blocks,
+            )
 
         else:
             raise RuntimeError(f"[omni] Unexpected status '{status}' from engine {eng_index} in state {engine.state}.")

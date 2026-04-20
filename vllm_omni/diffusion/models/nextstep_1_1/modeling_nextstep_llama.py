@@ -17,10 +17,25 @@ def _default_rope_init(config, device=None, seq_len=None, layer_type=None):
     transformers>=5.0 removed the 'default' entry from
     ``ROPE_INIT_FUNCTIONS``; reimplement the original behaviour so that
     ``rope_type='default'`` configs keep working.
+
+    transformers>=5.0 also no longer promotes ``rope_theta`` to a top-level
+    attribute on configs that only declare it inside ``rope_parameters`` /
+    ``rope_scaling`` (e.g. NextStep-1.1). Resolve it defensively before
+    computing the inverse frequency so the init does not explode on those
+    configs.
     """
     head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is None:
+        for attr in ("rope_parameters", "rope_scaling"):
+            params = getattr(config, attr, None)
+            if isinstance(params, dict) and "rope_theta" in params:
+                rope_theta = params["rope_theta"]
+                break
+    if rope_theta is None:
+        rope_theta = 10000.0
     inv_freq = 1.0 / (
-        config.rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim)
+        float(rope_theta) ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim)
     )
     return inv_freq, 1.0
 from vllm.model_executor.layers.linear import (

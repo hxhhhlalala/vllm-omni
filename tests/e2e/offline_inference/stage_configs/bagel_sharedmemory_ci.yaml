@@ -14,11 +14,14 @@ stage_args:
       worker_type: ar
       scheduler_cls: vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler
       # LLM and diffusion stages share GPU 0 in this CI config. The diffusion
-      # worker loads ~28 GiB of Bagel weights into the same device, so we
-      # cap the LLM stage at 0.6 of an 80 GiB H100 (~48 GiB). Any higher and
-      # vLLM's KV-cache allocator blows past free memory and OOMs; any lower
-      # and the profile pass's activation peak leaves no room for KV blocks.
-      gpu_memory_utilization: 0.6
+      # worker loads ~28 GiB of Bagel weights into the same device. On build
+      # 1012 the LLM process grew to ~50 GiB (PyTorch overhead on top of the
+      # KV-cache target) while stage-1 used ~28 GiB, blowing past the 80 GiB
+      # H100 budget. Cap the LLM stage at 0.55 (~44 GiB nominal, ~46 GiB with
+      # allocator overhead) to leave stage-1 a comfortable ~30 GiB cushion.
+      # Any higher and vLLM's KV-cache allocator OOMs; any lower and the
+      # profile pass's activation peak leaves no room for KV blocks.
+      gpu_memory_utilization: 0.55
       enforce_eager: true
       trust_remote_code: true
       engine_output_type: text
