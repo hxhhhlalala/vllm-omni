@@ -206,6 +206,10 @@ def talker2code2wav_async_chunk(
 
     if length <= 0:
         if finished:
+            logger.info(
+                "[tts_async_chunk] tail-flush req=%s length=0 finished=True (empty payload)",
+                request_id,
+            )
             return {
                 "code_predictor_codes": [],
                 "finished": True,
@@ -244,14 +248,39 @@ def talker2code2wav_async_chunk(
     # distorted audio.  Use `.get()` (not `.pop()`) to keep ref_code for
     # subsequent chunks.
     ref_code = request_payload.get(request_id)
+    ref_frame_count = 0
     if isinstance(ref_code, torch.Tensor) and ref_code.numel() > 0:
         ref_frames = ref_code.tolist()
         window_frames = ref_frames + window_frames
         left_context_size += len(ref_frames)
+        ref_frame_count = len(ref_frames)
 
     num_quantizers = len(window_frames[0])
     num_frames = len(window_frames)
     code_predictor_codes = [window_frames[f][q] for q in range(num_quantizers) for f in range(num_frames)]
+
+    # L4 async_chunk diagnostic: trace each chunk adapter emission so we can
+    # reconstruct what Code2Wav is being fed per step on CI. The correlated
+    # "Code2Wav input_ids length N" log at the decoder side together with this
+    # per-emission record is enough to tell a real stream (prefix of >= Q*F
+    # frame-aligned tokens) from a degenerate decode-loop 1-token payload.
+    logger.info(
+        "[tts_async_chunk] emit req=%s length=%d ctx=%d left_ctx=%d "
+        "ref_frames=%d num_frames=%d Q=%d flat_len=%d finished=%s in_initial=%s "
+        "initial_ic=%d chunk_size=%d",
+        request_id,
+        length,
+        context_length,
+        left_context_size,
+        ref_frame_count,
+        num_frames,
+        num_quantizers,
+        len(code_predictor_codes),
+        finished,
+        in_initial_phase,
+        initial_chunk_size,
+        chunk_size,
+    )
 
     info: dict[str, Any] = {
         "code_predictor_codes": code_predictor_codes,

@@ -275,7 +275,25 @@ class Qwen3TTSCode2Wav(nn.Module):
             )
 
         ids = input_ids.reshape(-1).to(dtype=torch.long)
-        request_ids_list = self._split_request_ids(ids, kwargs.get("seq_token_counts"))
+        seq_token_counts = kwargs.get("seq_token_counts")
+        request_ids_list = self._split_request_ids(ids, seq_token_counts)
+
+        # L4 async_chunk diagnostic: pair this with the [tts_async_chunk] emit
+        # log on the talker side to see how each per-request slice that lands
+        # at Code2Wav relates to the frame-aligned window the adapter emitted.
+        # If a 1-token slice shows up here without a matching adapter emit,
+        # the scheduler is driving decode past the intended NAR prefill.
+        info_keys = None
+        if runtime_additional_information is not None:
+            info_keys = [sorted(info.keys()) if isinstance(info, dict) else type(info).__name__ for info in runtime_additional_information]
+        logger.info(
+            "[code2wav_forward] enter batch=%d total_ids=%d per_req_lens=%s seq_counts=%s runtime_info=%s",
+            len(request_ids_list),
+            ids.numel(),
+            [int(r.numel()) for r in request_ids_list],
+            list(seq_token_counts) if seq_token_counts is not None else None,
+            info_keys,
+        )
 
         parsed: list[tuple[int, int]] = []
         valid_codes_qf: list[torch.Tensor] = []
