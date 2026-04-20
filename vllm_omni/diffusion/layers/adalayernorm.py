@@ -1,7 +1,6 @@
 from importlib.util import find_spec
 
 import torch
-import torch.nn as nn
 from vllm.logger import init_logger
 
 from vllm_omni.diffusion.layers.custom_op import CustomOp
