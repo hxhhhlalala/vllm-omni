@@ -21,8 +21,10 @@ class VoxtralTTSConfig(PretrainedConfig):
         audio_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
-
+        # transformers>=5.0 runs validate_token_ids() inside
+        # PretrainedConfig.__init__, which calls self.get_text_config().
+        # Assign self.text_config BEFORE super().__init__() so the
+        # validator can resolve it.
         if isinstance(text_config, PretrainedConfig):
             self.text_config = text_config
         elif isinstance(text_config, dict):
@@ -32,8 +34,10 @@ class VoxtralTTSConfig(PretrainedConfig):
 
         self.audio_config = audio_config or {}
 
+        super().__init__(**kwargs)
+
     def get_text_config(self, **kwargs: Any) -> PretrainedConfig:
-        return self.text_config
+        return getattr(self, "text_config", None) or PretrainedConfig()
 
 
 @register_config_parser("mistral")

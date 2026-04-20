@@ -1734,11 +1734,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         try:
             if not request.input or not request.input.strip():
-                raise ValueError("Input text cannot be empty")
+                return self._diffusion_error_response("Input text cannot be empty", status_code=400)
 
             request_id = f"speech-{random_uuid()}"
             prompt: dict[str, Any] = {"input": request.input}
             if request.ref_audio:
+                fmt_err = self._validate_ref_audio_format(request.ref_audio)
+                if fmt_err:
+                    return self._diffusion_error_response(fmt_err, status_code=400)
                 wav, sr = await self._resolve_ref_audio(request.ref_audio)
                 prompt["ref_audio"] = (np.asarray(wav, dtype=np.float32), sr)
             if request.ref_text:
@@ -1806,10 +1809,13 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return self._diffusion_error_response(f"Speech generation failed: {e}")
 
     @staticmethod
-    def _diffusion_error_response(message: str) -> Response:
+    def _diffusion_error_response(message: str, status_code: int = 500) -> Response:
         """Create a JSON error response without depending on OpenAIServing."""
-        error_body = json.dumps({"error": {"message": message, "type": "server_error", "param": None, "code": 500}})
-        return Response(content=error_body, media_type="application/json", status_code=500)
+        err_type = "invalid_request_error" if 400 <= status_code < 500 else "server_error"
+        error_body = json.dumps(
+            {"error": {"message": message, "type": err_type, "param": None, "code": status_code}}
+        )
+        return Response(content=error_body, media_type="application/json", status_code=status_code)
 
     async def create_speech(
         self,
