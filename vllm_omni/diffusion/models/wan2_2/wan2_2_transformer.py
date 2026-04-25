@@ -858,7 +858,12 @@ class WanTransformer3DModel(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 WanTransformerBlock(
-                    inner_dim, ffn_dim, num_attention_heads, eps, added_kv_proj_dim, cross_attn_norm,
+                    inner_dim,
+                    ffn_dim,
+                    num_attention_heads,
+                    eps,
+                    added_kv_proj_dim,
+                    cross_attn_norm,
                     quant_config=quant_config,
                 )
                 for _ in range(num_layers)

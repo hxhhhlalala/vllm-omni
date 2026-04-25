@@ -10,8 +10,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
 from vllm_omni.diffusion.distributed.sp_plan import SequenceParallelInput
 from vllm_omni.diffusion.distributed.sp_sharding import sp_shard
 from vllm_omni.diffusion.forward_context import get_forward_context

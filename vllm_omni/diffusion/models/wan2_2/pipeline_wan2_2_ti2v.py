@@ -44,6 +44,7 @@ from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import (
     resolve_wan_sample_solver,
     retrieve_latents,
 )
+from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import WanTransformer3DModel
 from vllm_omni.diffusion.postprocess import interpolate_video_tensor
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
@@ -203,7 +204,7 @@ class Wan22TI2VPipeline(nn.Module, SupportImageInput, CFGParallelMixin, Progress
         # TI2V always uses expand_timesteps mode
         self.expand_timesteps = True
 
-    def _create_transformer(self, config: dict) -> "WanTransformer3DModel":
+    def _create_transformer(self, config: dict) -> WanTransformer3DModel:
         """Create a transformer from a config dict. Respects od_config.quantization_config."""
         quant_config = getattr(self.od_config, "quantization_config", None)
         return create_transformer_from_config(config, quant_config=quant_config)

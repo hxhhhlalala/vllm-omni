@@ -35,6 +35,7 @@ from vllm_omni.diffusion.models.wan2_2.pipeline_wan2_2 import (
     resolve_wan_sample_solver,
     retrieve_latents,
 )
+from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import WanTransformer3DModel
 from vllm_omni.diffusion.postprocess import interpolate_video_tensor
 from vllm_omni.diffusion.profiler.diffusion_pipeline_profiler import DiffusionPipelineProfilerMixin
 from vllm_omni.diffusion.request import OmniDiffusionRequest
@@ -351,7 +352,7 @@ class Wan22I2VPipeline(
         image_embeds = self.image_encoder(pixel_values, output_hidden_states=True)
         return image_embeds.hidden_states[-2]
 
-    def _create_transformer(self, config: dict) -> "WanTransformer3DModel":
+    def _create_transformer(self, config: dict) -> WanTransformer3DModel:
         """Create a transformer from a config dict. Respects od_config.quantization_config."""
         quant_config = getattr(self.od_config, "quantization_config", None)
         return create_transformer_from_config(config, quant_config=quant_config)

@@ -16,7 +16,7 @@ Reference: MindIE-SD W8A8MXFP8QuantLinear (mindiesd/quantization/layer.py).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn import Module
@@ -53,12 +53,10 @@ def _get_torch_npu():
     if _torch_npu is None:
         try:
             import torch_npu as _tnpu
+
             _torch_npu = _tnpu
         except ImportError as e:
-            raise ImportError(
-                "DiffusionMXFP8Config requires torch_npu. "
-                "Please install the Ascend NPU toolkit."
-            ) from e
+            raise ImportError("DiffusionMXFP8Config requires torch_npu. Please install the Ascend NPU toolkit.") from e
     return _torch_npu
 
 
@@ -97,12 +95,12 @@ class DiffusionMXFP8Config(QuantizationConfig):
     def get_config_filenames(cls) -> list[str]:
         return []
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper") -> None:
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper) -> None:
         if self.ignored_layers:
             self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "DiffusionMXFP8Config":
+    def from_config(cls, config: dict[str, Any]) -> DiffusionMXFP8Config:
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(config, ["modules_to_not_convert"], None)
@@ -112,7 +110,7 @@ class DiffusionMXFP8Config(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> QuantizeMethodBase | None:
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
                 prefix=prefix,
@@ -132,6 +130,7 @@ class DiffusionMXFP8Config(QuantizationConfig):
 # ---------------------------------------------------------------------------
 # Lazy-weight mixin (copied from int8_config.py; shared pattern)
 # ---------------------------------------------------------------------------
+
 
 class _LazyWeightMixin:
     """Weight registered on meta device, materialised just-in-time on first load.
@@ -206,6 +205,7 @@ class _LazyWeightMixin:
 # NPU W8A8 MXFP8 online linear method
 # ---------------------------------------------------------------------------
 
+
 class NPUMXFP8OnlineLinearMethod(_LazyWeightMixin, LinearMethodBase):
     """NPU online W8A8 MXFP8 linear quantization method.
 
@@ -268,9 +268,7 @@ class NPUMXFP8OnlineLinearMethod(_LazyWeightMixin, LinearMethodBase):
         # -------------------------------------------------------------------
         weight = layer.weight  # (output, input) = (N, K)
 
-        weight_fp8, weight_scale_raw = torch_npu.npu_dynamic_mx_quant(
-            weight, dst_type=torch_npu.float8_e4m3fn
-        )
+        weight_fp8, weight_scale_raw = torch_npu.npu_dynamic_mx_quant(weight, dst_type=torch_npu.float8_e4m3fn)
         # weight_fp8      : (N, K) in float8_e4m3fn
         # weight_scale_raw: (N, S) in float8_e8m0fnu
         #   S depends on the torch_npu version and group_size (typically K/16 or K/32).
@@ -280,9 +278,8 @@ class NPUMXFP8OnlineLinearMethod(_LazyWeightMixin, LinearMethodBase):
         # so that apply() can pass it directly to npu_quant_matmul without
         # a per-forward-pass transpose.
         weight_scale = (
-            weight_scale_raw
-            .reshape(weight_scale_raw.shape[0], -1, 2)  # (N, S/2, 2)
-            .transpose(0, 1)                             # (S/2, N, 2)
+            weight_scale_raw.reshape(weight_scale_raw.shape[0], -1, 2)  # (N, S/2, 2)
+            .transpose(0, 1)  # (S/2, N, 2)
             .contiguous()
         )
 
@@ -312,9 +309,7 @@ class NPUMXFP8OnlineLinearMethod(_LazyWeightMixin, LinearMethodBase):
         x = x.reshape(-1, ori_shape[-1])  # (M, K)
 
         # Dynamic MXFP8 quantisation of activation.
-        x_fp8, x_scale = torch_npu.npu_dynamic_mx_quant(
-            x, dst_type=torch_npu.float8_e4m3fn
-        )
+        x_fp8, x_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float8_e4m3fn)
         # x_fp8  : (M, K) in float8_e4m3fn
         # x_scale: per-token MX scale in float8_e8m0fnu
 
