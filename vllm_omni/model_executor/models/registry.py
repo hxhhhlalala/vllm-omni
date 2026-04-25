@@ -139,6 +139,22 @@ _OMNI_MODELS = {
         "hunyuan_image3",
         "HunyuanImage3ForConditionalGeneration",
     ),
+    ## Wan2.2 T2V / I2V / TI2V video generation
+    "Wan22T2VForVideoGeneration": (
+        "wan2_2",
+        "wan2_2",
+        "Wan22T2VForVideoGeneration",
+    ),
+    "Wan22I2VForVideoGeneration": (
+        "wan2_2",
+        "wan2_2",
+        "Wan22I2VForVideoGeneration",
+    ),
+    "Wan22TI2VForVideoGeneration": (
+        "wan2_2",
+        "wan2_2",
+        "Wan22TI2VForVideoGeneration",
+    ),
     ## fish_speech (Fish Speech S2 Pro)
     "FishSpeechSlowARForConditionalGeneration": (
         "fish_speech",

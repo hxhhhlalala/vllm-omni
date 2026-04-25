@@ -190,7 +190,7 @@ class Wan22TI2VPipeline(nn.Module, SupportImageInput, CFGParallelMixin, Progress
         # Single transformer (TI2V uses dense 5B model, not MoE)
         # Load config from model to get correct dimensions
         transformer_config = load_transformer_config(model, "transformer", local_files_only)
-        self.transformer = create_transformer_from_config(transformer_config)
+        self.transformer = self._create_transformer(transformer_config)
 
         self._sample_solver = "unipc"
         self._flow_shift = od_config.flow_shift if od_config.flow_shift is not None else 5.0
@@ -202,6 +202,11 @@ class Wan22TI2VPipeline(nn.Module, SupportImageInput, CFGParallelMixin, Progress
 
         # TI2V always uses expand_timesteps mode
         self.expand_timesteps = True
+
+    def _create_transformer(self, config: dict) -> "WanTransformer3DModel":
+        """Create a transformer from a config dict. Respects od_config.quantization_config."""
+        quant_config = getattr(self.od_config, "quantization_config", None)
+        return create_transformer_from_config(config, quant_config=quant_config)
 
         self._guidance_scale = None
         self._num_timesteps = None

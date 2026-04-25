@@ -15,6 +15,7 @@ import torch
 from diffusers.utils.torch_utils import randn_tensor
 from torch import nn
 from transformers import AutoTokenizer, UMT5EncoderModel
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
@@ -116,9 +117,12 @@ def load_transformer_config(model_path: str, subfolder: str = "transformer", loc
     return {}
 
 
-def create_transformer_from_config(config: dict) -> WanTransformer3DModel:
+def create_transformer_from_config(
+    config: dict,
+    quant_config: QuantizationConfig | None = None,
+) -> WanTransformer3DModel:
     """Create WanTransformer3DModel from config dict."""
-    kwargs = {}
+    kwargs: dict = {}
 
     if "patch_size" in config:
         kwargs["patch_size"] = tuple(config["patch_size"])
@@ -150,6 +154,9 @@ def create_transformer_from_config(config: dict) -> WanTransformer3DModel:
         kwargs["rope_max_seq_len"] = config["rope_max_seq_len"]
     if "pos_embed_seq_len" in config:
         kwargs["pos_embed_seq_len"] = config["pos_embed_seq_len"]
+
+    if quant_config is not None:
+        kwargs["quant_config"] = quant_config
 
     return WanTransformer3DModel(**kwargs)
 
@@ -362,8 +369,9 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         )
 
     def _create_transformer(self, config: dict) -> WanTransformer3DModel:
-        """Create a transformer from a config dict. Subclasses may override."""
-        return create_transformer_from_config(config)
+        """Create a transformer from a config dict. Respects od_config.quantization_config."""
+        quant_config = getattr(self.od_config, "quantization_config", None)
+        return create_transformer_from_config(config, quant_config=quant_config)
 
     @property
     def guidance_scale(self):
