@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm_omni.diffusion.distributed.sp_plan import SequenceParallelInput
 from vllm_omni.diffusion.distributed.sp_sharding import sp_shard
 from vllm_omni.diffusion.forward_context import get_forward_context
@@ -33,8 +34,10 @@ class VaceWanTransformerBlock(WanTransformerBlock):
         added_kv_proj_dim: int | None = None,
         cross_attn_norm: bool = False,
         block_id: int = 0,
+        quant_config: QuantizationConfig | None = None,
     ):
-        super().__init__(dim, ffn_dim, num_heads, eps, added_kv_proj_dim, cross_attn_norm)
+        super().__init__(dim, ffn_dim, num_heads, eps, added_kv_proj_dim, cross_attn_norm, quant_config=quant_config)
+        # proj_in/proj_out are small residual projections; kept as plain nn.Linear
         self.proj_in = nn.Linear(dim, dim) if block_id == 0 else None
         self.proj_out = nn.Linear(dim, dim)
 
@@ -83,9 +86,10 @@ class WanVACETransformer3DModel(WanTransformer3DModel):
         *,
         vace_layers: list[int] | None = None,
         vace_in_channels: int | None = None,
+        quant_config: QuantizationConfig | None = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(quant_config=quant_config, **kwargs)
 
         self.vace_blocks = None
         self.vace_patch_embedding = None
@@ -118,6 +122,7 @@ class WanVACETransformer3DModel(WanTransformer3DModel):
                         self.config.added_kv_proj_dim,
                         self.config.cross_attn_norm,
                         block_id=i,
+                        quant_config=quant_config,
                     )
                     for i in range(len(vace_layers))
                 ]
