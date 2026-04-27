@@ -1,21 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""W8A8 MXFP8 (Microscaling FP8) online quantization for diffusion transformers.
+"""W8A8 MXFP8 (Microscaling FP8) online/offline quantization for diffusion transformers.
 
-W8: weight quantized to FP8 (float8_e4m3fn) with MX group scales (E8M0 per 32 elements).
-A8: activation quantized to FP8 (float8_e4m3fn) dynamically per-token each forward pass.
+Architecture (mirrors int8_config.py pattern):
 
-Only online quantization is supported: loads BF16/FP16 checkpoint and quantizes
-weight to FP8 at load time via npu_dynamic_mx_quant.
+  MXFPLinearMethodBase            – platform-agnostic skeleton; defines apply() and
+                                     two abstract ops (_quantize_activation, _quant_matmul).
+    NPUMxfp8LinearMethod          – NPU offline: create_weights for pre-quantized checkpoint,
+                                     process_weights normalization, and NPU MXFP8 ops.
+      NPUMxfp8OnlineLinearMethod  – NPU online: _LazyWeightMixin for create_weights,
+                                     overrides process_weights to quantize BF16 → FP8.
 
-Platform: NPU (Ascend) only.  Requires torch_npu with npu_dynamic_mx_quant and
-npu_quant_matmul (MX-scale variant with scale_dtype=float8_e8m0fnu).
+Extending to a new platform (e.g. CUDA MXFP8 once the ops are available):
 
-Reference: MindIE-SD W8A8MXFP8QuantLinear (mindiesd/quantization/layer.py).
+    class CUDAMxfp8LinearMethod(MXFPLinearMethodBase):
+        def create_weights(self, ...): ...
+        def process_weights_after_loading(self, layer): ...
+        def _quantize_activation(self, x): ...   # CUDA FP8 quant op
+        def _quant_matmul(self, ...): ...         # CUDA FP8 GEMM
+
+    class CUDAMxfp8OnlineLinearMethod(_LazyWeightMixin, CUDAMxfp8LinearMethod):
+        def process_weights_after_loading(self, layer): ...  # BF16 → FP8
+
+Extending to a new MX precision (e.g. MXFP4 on NPU — handled in mxfp4_config.py):
+
+    class NPUMxfp4LinearMethod(MXFPLinearMethodBase):
+        def _quantize_activation(self, x): ...  # FP4 quant
+        def _quant_matmul(self, ...): ...       # FP4 GEMM (x1_dtype/x2_dtype=float4_e2m1fn_x2)
 """
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -60,12 +76,16 @@ def _get_torch_npu():
     return _torch_npu
 
 
-class DiffusionMXFP8Config(QuantizationConfig):
-    """W8A8 MXFP8 online quantization config for NPU diffusion transformers.
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
-    Loads BF16/FP16 checkpoints and quantizes linear layer weights to FP8 at
-    load time using torch_npu.npu_dynamic_mx_quant.  Activations are quantized
-    dynamically to FP8 on every forward pass.
+
+class DiffusionMXFP8Config(QuantizationConfig):
+    """W8A8 MXFP8 quantization config for diffusion transformers.
+
+    Supports both online (BF16 checkpoint → quantize at load time) and offline
+    (pre-quantized MXFP8 checkpoint) modes, mirroring DiffusionInt8Config.
 
     MX (microscaling) format: groups of 32 K-dimension elements share one
     float8_e8m0fnu exponent scale, matching MXFP8 as defined in the OCP MX spec.
@@ -73,9 +93,11 @@ class DiffusionMXFP8Config(QuantizationConfig):
 
     def __init__(
         self,
+        is_checkpoint_mxfp8_serialized: bool = False,
         ignored_layers: list[str] | None = None,
     ) -> None:
         super().__init__()
+        self.is_checkpoint_mxfp8_serialized = is_checkpoint_mxfp8_serialized
         self.ignored_layers = ignored_layers or []
 
     @classmethod
@@ -88,7 +110,6 @@ class DiffusionMXFP8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # Verified on Ascend A2/A3.  Not applicable to CUDA (NPU-only).
         return 80
 
     @classmethod
@@ -101,10 +122,15 @@ class DiffusionMXFP8Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> DiffusionMXFP8Config:
+        quant_method = cls.get_from_keys_or(config, ["quant_method"], "")
+        is_serialized = "mxfp8" in str(quant_method).lower()
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(config, ["modules_to_not_convert"], None)
-        return cls(ignored_layers=ignored_layers)
+        return cls(
+            is_checkpoint_mxfp8_serialized=is_serialized,
+            ignored_layers=ignored_layers,
+        )
 
     def get_quant_method(
         self,
@@ -118,25 +144,28 @@ class DiffusionMXFP8Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            if not current_omni_platform.is_npu():
-                raise NotImplementedError(
-                    "DiffusionMXFP8Config (W8A8 MXFP8) is currently only supported "
-                    "on NPU (Ascend) platforms. CUDA support is not yet implemented."
-                )
-            return NPUMXFP8OnlineLinearMethod(self)
+            if current_omni_platform.is_npu():
+                if self.is_checkpoint_mxfp8_serialized:
+                    return NPUMxfp8LinearMethod(self)
+                return NPUMxfp8OnlineLinearMethod(self)
+            # Placeholder for future platforms: add `elif is_cuda(): ...` here.
+            raise NotImplementedError(
+                "DiffusionMXFP8Config (W8A8 MXFP8) is currently only supported "
+                "on NPU (Ascend) platforms. CUDA support is not yet implemented."
+            )
         return None
 
 
 # ---------------------------------------------------------------------------
-# Lazy-weight mixin (copied from int8_config.py; shared pattern)
+# _LazyWeightMixin — shared by all online methods
 # ---------------------------------------------------------------------------
 
 
 class _LazyWeightMixin:
-    """Weight registered on meta device, materialised just-in-time on first load.
+    """Weight registered on meta device, materialised just-in-time on first load chunk.
 
-    This is a local copy of the pattern in int8_config.LazyWeightMixin so that
-    mxfp8_config.py has no import dependency on int8_config.py.
+    Platform-agnostic; shared by all online MXFP methods.
+    Imported by mxfp4_config.py to avoid duplication.
     """
 
     uses_meta_device: bool = True
@@ -163,7 +192,6 @@ class _LazyWeightMixin:
         def patched_weight_loader(param, loaded_weight, *args, **kwargs):
             if not hasattr(layer, "_loaded_numel"):
                 layer._loaded_numel = 0
-                # Materialise weight from meta device on first chunk.
                 weight = ModelWeightParameter(
                     data=torch.empty_like(layer.weight, device=layer._load_device),
                     input_dim=1,
@@ -183,7 +211,6 @@ class _LazyWeightMixin:
             if layer._loaded_numel == layer.weight.numel():
                 self.process_weights_after_loading(layer)
                 layer._already_called_process_weights_after_loading = True
-
             return res
 
         weight = ModelWeightParameter(
@@ -202,47 +229,181 @@ class _LazyWeightMixin:
 
 
 # ---------------------------------------------------------------------------
-# NPU W8A8 MXFP8 online linear method
+# Abstract base — platform-agnostic apply skeleton
 # ---------------------------------------------------------------------------
 
 
-class NPUMXFP8OnlineLinearMethod(_LazyWeightMixin, LinearMethodBase):
-    """NPU online W8A8 MXFP8 linear quantization method.
+class MXFPLinearMethodBase(LinearMethodBase, ABC):
+    """Platform-agnostic MXFP linear method base.
 
-    Weight quantization (at load time, process_weights_after_loading):
-      BF16/FP16 weight (N, K)
-        → npu_dynamic_mx_quant(..., dst_type=float8_e4m3fn)
-        → weight_fp8 (N, K) in float8_e4m3fn
-        → transposed to (K, N), stored on layer
-      weight_scale (N, S) in float8_e8m0fnu
-        → reshape to (N, S/2, 2)          # MindIE-SD offline format
-        → transposed to (S/2, N, 2)        # GEMM layout
-        → stored on layer as weight_scale
+    Defines the apply() skeleton (flatten → quantize activation → GEMM → reshape)
+    and two abstract hooks that platform-specific subclasses must implement:
 
-    Activation quantization (each forward pass, apply):
-      BF16/FP16 activation (M, K)
-        → npu_dynamic_mx_quant(..., dst_type=float8_e4m3fn)
-        → x_fp8 (M, K), x_scale per-token in float8_e8m0fnu
+      _quantize_activation(x)                              → (x_q, x_scale)
+      _quant_matmul(x_q, x_scale, layer, bias, ori_dtype)  → output
 
-    GEMM:
-      npu_quant_matmul(x_fp8, weight_fp8, weight_scale,
-                       scale_dtype=float8_e8m0fnu,
-                       pertoken_scale=x_scale,
-                       pertoken_scale_dtype=float8_e8m0fnu,
-                       group_sizes=[1, 1, 32])
+    Mirrors BaseInt8LinearMethod but with explicit abstract method separation.
+    """
 
-    Note on weight_scale shape: npu_dynamic_mx_quant returns the weight scale
-    in a shape that may vary across torch_npu versions.  The reshape and transpose
-    applied here follow the MindIE-SD W8A8MXFP8QuantLinear convention and assume
-    the returned scale has an even-sized last dimension.  Verify on your target
-    torch_npu version if you encounter shape errors.
+    @abstractmethod
+    def _quantize_activation(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize 2-D activation to MXFP format. Returns (x_quantized, x_scale)."""
+
+    @abstractmethod
+    def _quant_matmul(
+        self,
+        x_q: torch.Tensor,
+        x_scale: torch.Tensor,
+        layer: torch.nn.Module,
+        bias: torch.Tensor | None,
+        ori_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Fused MXFP quantized GEMM. Weight and scale accessed from layer."""
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Shared apply skeleton for all MXFP variants (online and offline)."""
+        ori_shape = x.shape
+        ori_dtype = x.dtype
+
+        # Flatten to 2-D before GEMM; reshape back afterwards.
+        x = x.reshape(-1, ori_shape[-1])
+
+        x_q, x_scale = self._quantize_activation(x)
+        output = self._quant_matmul(x_q, x_scale, layer, bias, ori_dtype)
+        return output.reshape(*ori_shape[:-1], -1)
+
+
+# ---------------------------------------------------------------------------
+# NPU MXFP8 offline method (pre-quantized checkpoint)
+# ---------------------------------------------------------------------------
+
+
+class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
+    """NPU W8A8 MXFP8 offline linear method for pre-quantized checkpoints.
+
+    Weight canonical layout after process_weights_after_loading:
+      weight      : (K, N) in float8_e4m3fn   (pre-transposed for GEMM)
+      weight_scale: (S/2, N, 2) in float8_e8m0fnu  (reshaped + pre-transposed)
+
+    NPUMxfp8OnlineLinearMethod normalizes to the same layout, so apply() and
+    _quant_matmul() are fully shared between online and offline paths.
     """
 
     def __init__(self, quant_config: DiffusionMXFP8Config) -> None:
         self.quant_config = quant_config
         self.out_dtype = torch.get_default_dtype()
 
-    # create_weights is inherited from _LazyWeightMixin.
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        """Register weight and per-group MX scale for a pre-quantized checkpoint."""
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # Weight: BF16 placeholder; cast to float8_e4m3fn in process_weights.
+        weight = ModelWeightParameter(
+            data=torch.empty(output_size_per_partition, input_size_per_partition, dtype=params_dtype),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # Scale: (N, K//32) per-group MX scale; sharded along output (N) for TP.
+        num_groups = (input_size_per_partition + 31) // 32
+        scale = ModelWeightParameter(
+            data=torch.empty(output_size_per_partition, num_groups, dtype=torch.float32),
+            input_dim=None,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale", scale)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        """Cast checkpoint weight to FP8 and normalize to canonical GEMM layout."""
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        torch_npu = _get_torch_npu()
+
+        # NPU: cast to float8_e4m3fn if needed, then transpose (N,K) → (K,N).
+        w = layer.weight
+        if w.dtype != torch_npu.float8_e4m3fn:
+            w = torch_npu.npu_dtype_cast(w.npu(), torch_npu.float8_e4m3fn)
+        w = w.transpose(0, 1).contiguous()
+
+        # Normalize scale: (N, S) → (N, S/2, 2) → (S/2, N, 2).
+        s = layer.weight_scale.to(torch_npu.float8_e8m0fnu)
+        s = s.reshape(s.shape[0], -1, 2).transpose(0, 1).contiguous()
+
+        replace_parameter(layer, "weight", w)
+        replace_parameter(layer, "weight_scale", s)
+        layer._already_called_process_weights_after_loading = True
+
+    # --- NPU MXFP8 ops — shared with online path via inheritance ---
+
+    def _quantize_activation(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        torch_npu = _get_torch_npu()
+        return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float8_e4m3fn)
+
+    def _quant_matmul(
+        self,
+        x_q: torch.Tensor,
+        x_scale: torch.Tensor,
+        layer: torch.nn.Module,
+        bias: torch.Tensor | None,
+        ori_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        torch_npu = _get_torch_npu()
+        # NPU npu_quant_matmul requires bias in float32.
+        if bias is not None and bias.dtype != torch.float32:
+            bias = bias.to(torch.float32)
+        return torch_npu.npu_quant_matmul(
+            x_q,
+            layer.weight,  # (K, N) float8_e4m3fn
+            layer.weight_scale,  # (S/2, N, 2) float8_e8m0fnu
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            pertoken_scale=x_scale,
+            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            bias=bias,
+            output_dtype=ori_dtype,
+            group_sizes=[1, 1, 32],
+        )
+
+
+# ---------------------------------------------------------------------------
+# NPU MXFP8 online method (BF16 checkpoint → quantize at load time)
+# ---------------------------------------------------------------------------
+
+
+class NPUMxfp8OnlineLinearMethod(_LazyWeightMixin, NPUMxfp8LinearMethod):
+    """NPU W8A8 MXFP8 online linear method.
+
+    MRO: NPUMxfp8OnlineLinearMethod → _LazyWeightMixin → NPUMxfp8LinearMethod
+         → MXFPLinearMethodBase → LinearMethodBase
+
+      create_weights   : _LazyWeightMixin      (meta device + patched loader)
+      process_weights  : NPUMxfp8OnlineLinearMethod  (BF16 → FP8 + normalize)
+      apply / ops      : NPUMxfp8LinearMethod / MXFPLinearMethodBase  (shared)
+    """
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -250,8 +411,7 @@ class NPUMXFP8OnlineLinearMethod(_LazyWeightMixin, LinearMethodBase):
 
         torch_npu = _get_torch_npu()
 
-        # Materialise weight if it is still on the meta device (e.g. when no
-        # real checkpoint shards were loaded, as in dummy-weight initialisation).
+        # Materialise weight if still on meta device (dummy-weight init path).
         if layer.weight.device == torch.device("meta"):
             weight = ModelWeightParameter(
                 data=torch.empty_like(layer.weight, device=layer._load_device),
@@ -263,74 +423,13 @@ class NPUMXFP8OnlineLinearMethod(_LazyWeightMixin, LinearMethodBase):
             layer.register_parameter("weight", weight)
             initialize_single_dummy_weight(layer.weight)
 
-        # -------------------------------------------------------------------
-        # Quantize weight: BF16/FP16 (N, K) → FP8 (N, K) + MX scale
-        # -------------------------------------------------------------------
-        weight = layer.weight  # (output, input) = (N, K)
+        # NPU: quantize BF16/FP16 (N, K) → FP8 (N, K) + MX scale (N, S).
+        weight_fp8, weight_scale_raw = torch_npu.npu_dynamic_mx_quant(layer.weight, dst_type=torch_npu.float8_e4m3fn)
 
-        weight_fp8, weight_scale_raw = torch_npu.npu_dynamic_mx_quant(weight, dst_type=torch_npu.float8_e4m3fn)
-        # weight_fp8      : (N, K) in float8_e4m3fn
-        # weight_scale_raw: (N, S) in float8_e8m0fnu
-        #   S depends on the torch_npu version and group_size (typically K/16 or K/32).
-        #   The reshape below follows MindIE-SD's offline weight_scale format.
-
-        # Reshape scale to (N, S/2, 2) then pre-transpose to (S/2, N, 2)
-        # so that apply() can pass it directly to npu_quant_matmul without
-        # a per-forward-pass transpose.
-        weight_scale = (
-            weight_scale_raw.reshape(weight_scale_raw.shape[0], -1, 2)  # (N, S/2, 2)
-            .transpose(0, 1)  # (S/2, N, 2)
-            .contiguous()
-        )
-
-        # Pre-transpose weight to (K, N) for GEMM (avoids per-forward transpose).
-        weight_fp8 = weight_fp8.transpose(0, 1).contiguous()  # (K, N)
+        # Normalize to canonical layout shared with offline path.
+        weight_scale = weight_scale_raw.reshape(weight_scale_raw.shape[0], -1, 2).transpose(0, 1).contiguous()
+        weight_fp8 = weight_fp8.transpose(0, 1).contiguous()
 
         replace_parameter(layer, "weight", weight_fp8)
-        # weight_scale is new (not registered in create_weights); replace_parameter
-        # will register it as a buffer via module.register_buffer.
         replace_parameter(layer, "weight_scale", weight_scale)
-
         layer._already_called_process_weights_after_loading = True
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        torch_npu = _get_torch_npu()
-
-        ori_shape = x.shape
-        ori_dtype = x.dtype
-
-        # Flatten to 2-D for the NPU kernel (avoids per-element overhead on N-D
-        # tensors, mirroring the _flatten_linear pattern in MindIE-SD).
-        x = x.reshape(-1, ori_shape[-1])  # (M, K)
-
-        # Dynamic MXFP8 quantisation of activation.
-        x_fp8, x_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float8_e4m3fn)
-        # x_fp8  : (M, K) in float8_e4m3fn
-        # x_scale: per-token MX scale in float8_e8m0fnu
-
-        # npu_quant_matmul requires bias in float32 when provided.
-        if bias is not None and bias.dtype != torch.float32:
-            bias = bias.to(torch.float32)
-
-        # W8A8 MXFP8 fused GEMM.
-        # layer.weight      : (K, N)      float8_e4m3fn  (pre-transposed)
-        # layer.weight_scale: (S/2, N, 2) float8_e8m0fnu (pre-transposed)
-        # x_scale           : per-token   float8_e8m0fnu
-        output = torch_npu.npu_quant_matmul(
-            x_fp8,
-            layer.weight,
-            layer.weight_scale,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale=x_scale,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-            bias=bias,
-            output_dtype=ori_dtype,
-            group_sizes=[1, 1, 32],
-        )
-
-        return output.reshape(*ori_shape[:-1], -1)
