@@ -1024,11 +1024,15 @@ class WanTransformer3DModel(nn.Module):
             original_name = name
             lookup_name = name
 
-            # Handle QKV fusion
+            # Handle QKV fusion for weight tensors (separate to_q/k/v → fused to_qkv).
+            # Pre-fused to_qkv tensors (from offline MXFP8 merged checkpoint) fall
+            # through to the else branch and are loaded directly.
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in original_name:
                     continue
                 lookup_name = original_name.replace(weight_name, param_name)
+                if lookup_name not in params_dict:
+                    break
                 param = params_dict[lookup_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)

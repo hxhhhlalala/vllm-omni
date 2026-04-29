@@ -155,6 +155,27 @@ def create_transformer_from_config(
     if "pos_embed_seq_len" in config:
         kwargs["pos_embed_seq_len"] = config["pos_embed_seq_len"]
 
+    # Auto-detect quantization from transformer's config.json when not explicitly provided.
+    # merge_mxfp8_checkpoint.py injects quantization_config into config.json so that
+    # offline quantized checkpoints are recognized here without a CLI flag.
+    if quant_config is None and "quantization_config" in config:
+        from vllm_omni.quantization.factory import build_quant_config
+        disk_qc = config["quantization_config"]
+        if isinstance(disk_qc, dict) and "quant_method" in disk_qc:
+            qc_method = disk_qc["quant_method"]
+            qc_kwargs = {k: v for k, v in disk_qc.items() if k != "quant_method"}
+            quant_config = build_quant_config(qc_method, **qc_kwargs)
+            logger.info(
+                "Auto-detected quantization from transformer config.json: method=%s kwargs=%s",
+                qc_method, qc_kwargs,
+            )
+        elif isinstance(disk_qc, str):
+            quant_config = build_quant_config(disk_qc)
+            logger.info(
+                "Auto-detected quantization from transformer config.json: method=%s",
+                disk_qc,
+            )
+
     if quant_config is not None:
         kwargs["quant_config"] = quant_config
 
