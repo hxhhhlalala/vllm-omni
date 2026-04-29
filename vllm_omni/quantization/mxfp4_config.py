@@ -305,3 +305,143 @@ class NPUMxfp4OnlineLinearMethod(_LazyWeightMixin, NPUMxfp4LinearMethod):
         replace_parameter(layer, "weight", weight_fp4)
         replace_parameter(layer, "weight_scale", weight_scale)
         layer._already_called_process_weights_after_loading = True
+
+
+# ---------------------------------------------------------------------------
+# NPU MXFP4 dual-scale offline method (W4A4_MXFP4_DUALSCALE checkpoint)
+# ---------------------------------------------------------------------------
+
+
+class NPUMxfp4DualScaleLinearMethod(MXFPLinearMethodBase):
+    """NPU W4A4 MXFP4 dual-scale offline method for pre-quantized checkpoints.
+
+    Two extra per-layer tensors versus the single-scale offline path:
+      weight_dual_scale : (N,) float32  – per-output-channel secondary scale
+      mul_scale         : (K,) float32  – per-input-channel activation pre-scale
+
+    Forward:
+      x_scaled          = x * mul_scale
+      x_q, x_act_scale  = npu_dynamic_mx_quant(x_scaled)
+      output            = npu_quant_matmul(...) * weight_dual_scale
+    """
+
+    def __init__(self, quant_config: Any) -> None:
+        self.quant_config = quant_config
+        self.out_dtype = torch.get_default_dtype()
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        torch_npu = _get_torch_npu()
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        layer.register_parameter("weight", ModelWeightParameter(
+            data=torch.empty(output_size_per_partition, input_size_per_partition, dtype=params_dtype),
+            input_dim=1, output_dim=0, weight_loader=weight_loader,
+        ))
+
+        num_groups = (input_size_per_partition + 31) // 32
+        layer.register_parameter("weight_scale", ModelWeightParameter(
+            data=torch.empty(output_size_per_partition, num_groups, dtype=torch_npu.float8_e8m0fnu),
+            input_dim=None, output_dim=0, weight_loader=weight_loader,
+        ))
+
+        layer.register_parameter("weight_dual_scale", ModelWeightParameter(
+            data=torch.empty(output_size_per_partition, dtype=torch.float32),
+            input_dim=None, output_dim=0, weight_loader=weight_loader,
+        ))
+
+        layer.register_parameter("mul_scale", ModelWeightParameter(
+            data=torch.empty(input_size_per_partition, dtype=torch.float32),
+            input_dim=None, output_dim=None, weight_loader=weight_loader,
+        ))
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        torch_npu = _get_torch_npu()
+
+        # weight: cast to float4_e2m1fn_x2; stays (N, K), no pre-transpose
+        w = layer.weight
+        if w.dtype != torch_npu.float4_e2m1fn_x2:
+            w = torch_npu.npu_dtype_cast(w.npu(), torch_npu.float4_e2m1fn_x2)
+
+        # weight_scale: (N, K_groups) → (N, K_groups//2, 2); not pre-transposed
+        s = layer.weight_scale.data
+        if s.dtype != torch_npu.float8_e8m0fnu:
+            s = s.to(torch_npu.float8_e8m0fnu)
+        N, K_groups = s.shape
+        if K_groups % 2 == 1:
+            s = torch.cat([s, torch.zeros(N, 1, dtype=s.dtype, device=s.device)], dim=1)
+            K_groups += 1
+        s = s.reshape(N, K_groups // 2, 2).contiguous()
+
+        # weight_dual_scale: (N,) float32, ensure on NPU
+        ds = layer.weight_dual_scale.data.view(-1).npu().contiguous()
+
+        # mul_scale: (K,) float32, ensure on NPU
+        ms = layer.mul_scale.data.view(-1).npu().contiguous()
+
+        replace_parameter(layer, "weight", w)
+        replace_parameter(layer, "weight_scale", s)
+        replace_parameter(layer, "weight_dual_scale", ds)
+        replace_parameter(layer, "mul_scale", ms)
+        layer._already_called_process_weights_after_loading = True
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        ori_shape = x.shape
+        ori_dtype = x.dtype
+        x = x.reshape(-1, ori_shape[-1])
+        x = x * layer.mul_scale          # per-input-channel pre-scale
+        x_q, x_scale = self._quantize_activation(x)
+        output = self._quant_matmul(x_q, x_scale, layer, bias, ori_dtype)
+        return output.reshape(*ori_shape[:-1], -1)
+
+    def _quantize_activation(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return _get_torch_npu().npu_dynamic_mx_quant(x)
+
+    def _quant_matmul(
+        self,
+        x_q: torch.Tensor,
+        x_scale: torch.Tensor,
+        layer: torch.nn.Module,
+        bias: torch.Tensor | None,
+        ori_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        torch_npu = _get_torch_npu()
+        if bias is not None and bias.dtype != torch.float32:
+            bias = bias.to(torch.float32)
+        output = torch_npu.npu_quant_matmul(
+            x_q,
+            layer.weight.transpose(0, 1),        # (K, N)
+            layer.weight_scale.transpose(0, 1),  # (K_groups//2, N, 2)
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            x1_dtype=torch_npu.float4_e2m1fn_x2,
+            x2_dtype=torch_npu.float4_e2m1fn_x2,
+            pertoken_scale=x_scale,
+            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            bias=bias,
+            output_dtype=ori_dtype,
+            group_sizes=[1, 1, 32],
+        )
+        return output * layer.weight_dual_scale  # (M, N) * (N,)

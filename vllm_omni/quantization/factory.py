@@ -55,6 +55,13 @@ def _build_mxfp4(**kw: Any) -> QuantizationConfig:
     return DiffusionMXFP4Config(**kw)
 
 
+def _build_mixed_mxfp(**kw: Any) -> QuantizationConfig:
+    """Lazy import for mixed MXFP8 + MXFP4 DualScale config (NPU only)."""
+    from .mixed_mxfp_config import DiffusionMixedMXFPConfig
+
+    return DiffusionMixedMXFPConfig(**kw)
+
+
 def _build_inc(**kw: Any) -> QuantizationConfig:
     """Lazy import for INC/AutoRound config with checkpoint kwarg normalization."""
     from .inc_config import OmniINCConfig
@@ -74,6 +81,7 @@ _OVERRIDES: dict[str, Callable[..., QuantizationConfig]] = {
     "int8": _build_int8,
     "mxfp8": _build_mxfp8,
     "mxfp4": _build_mxfp4,
+    "mixed_mxfp": _build_mixed_mxfp,
     "inc": _build_inc,
     "auto-round": _build_inc,
 }
