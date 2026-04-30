@@ -30,7 +30,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 
 from vllm_omni.platforms import current_omni_platform
-from vllm_omni.quantization.mxfp4_config import NPUMxfp4DualScaleLinearMethod, NPUMxfp4OnlineLinearMethod
+from vllm_omni.quantization.mxfp4_config import NPUMxfp4DualScaleLinearMethod, NPUMxfp4DualScaleOnlineLinearMethod
 from vllm_omni.quantization.mxfp8_config import NPUMxfp8LinearMethod, NPUMxfp8OnlineLinearMethod
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ class DiffusionMixedMXFPConfig(QuantizationConfig):
 
     online  mode: is_checkpoint_serialized=False
       blocks 0..N-1  → NPUMxfp8OnlineLinearMethod
-      blocks N..     → NPUMxfp4OnlineLinearMethod
+      blocks N..     → NPUMxfp4DualScaleOnlineLinearMethod
     """
 
     def __init__(
@@ -132,4 +132,4 @@ class DiffusionMixedMXFPConfig(QuantizationConfig):
         else:
             if in_mxfp8_range:
                 return NPUMxfp8OnlineLinearMethod(self)
-            return NPUMxfp4OnlineLinearMethod(self)
+            return NPUMxfp4DualScaleOnlineLinearMethod(self)
