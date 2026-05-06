@@ -212,14 +212,14 @@ class Wan22TI2VPipeline(nn.Module, SupportImageInput, CFGParallelMixin, Progress
         # TI2V always uses expand_timesteps mode
         self.expand_timesteps = True
 
+        self._guidance_scale = None
+        self._num_timesteps = None
+        self._current_timestep = None
+
     def _create_transformer(self, config: dict) -> WanTransformer3DModel:
         """Create a transformer from a config dict. Respects od_config.quantization_config."""
         quant_config = getattr(self.od_config, "quantization_config", None)
         return create_transformer_from_config(config, quant_config=quant_config)
-
-        self._guidance_scale = None
-        self._num_timesteps = None
-        self._current_timestep = None
 
     @property
     def guidance_scale(self):

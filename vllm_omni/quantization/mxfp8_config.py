@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """W8A8 MXFP8 (Microscaling FP8) online/offline quantization for diffusion transformers.
 
-Architecture (mirrors int8_config.py pattern):
+Architecture:
 
-  MXFPLinearMethodBase            – platform-agnostic skeleton; defines apply() and
-                                     two abstract ops (_quantize_activation, _quant_matmul).
+  MXFPLinearMethodBase            – platform-agnostic skeleton; defines apply() (reshape only),
+                                     _apply_inner() (default single-scale dispatch), and two
+                                     abstract ops (_quantize_activation, _quant_matmul).
     NPUMxfp8LinearMethod          – NPU offline: create_weights for pre-quantized checkpoint,
                                      process_weights normalization, and NPU MXFP8 ops.
       NPUMxfp8OnlineLinearMethod  – NPU online: _LazyWeightMixin for create_weights,
@@ -22,11 +23,12 @@ Extending to a new platform (e.g. CUDA MXFP8 once the ops are available):
     class CUDAMxfp8OnlineLinearMethod(_LazyWeightMixin, CUDAMxfp8LinearMethod):
         def process_weights_after_loading(self, layer): ...  # BF16 → FP8
 
-Extending to a new MX precision (e.g. MXFP4 on NPU — handled in mxfp4_config.py):
+Extending to a new MX precision with a different calling convention (e.g. dual-scale FP4):
 
-    class NPUMxfp4LinearMethod(MXFPLinearMethodBase):
-        def _quantize_activation(self, x): ...  # FP4 quant
-        def _quant_matmul(self, ...): ...       # FP4 GEMM (x1_dtype/x2_dtype=float4_e2m1fn_x2)
+    class NPUMxfp4DualScaleLinearMethod(MXFPLinearMethodBase):
+        def _apply_inner(self, layer, x, bias, ori_dtype): ...  # override for 3-tuple path
+        def _quantize_activation(self, x, smooth_scale): ...    # returns 3-tuple
+        def _quant_matmul(self, x_q, l0, l1, layer, ...): ...  # dual-level GEMM
 """
 
 from __future__ import annotations
@@ -236,18 +238,22 @@ class _LazyWeightMixin:
 class MXFPLinearMethodBase(LinearMethodBase, ABC):
     """Platform-agnostic MXFP linear method base.
 
-    Defines the apply() skeleton (flatten → quantize activation → GEMM → reshape)
-    and two abstract hooks that platform-specific subclasses must implement:
+    Defines the apply() skeleton (flatten → _apply_inner → reshape) and three
+    hooks that subclasses implement:
 
-      _quantize_activation(x)                              → (x_q, x_scale)
-      _quant_matmul(x_q, x_scale, layer, bias, ori_dtype)  → output
+      _quantize_activation(x)                              → tuple  (arity depends on variant)
+      _quant_matmul(x_q, x_scale, layer, bias, ori_dtype)  → Tensor (single-scale default)
+      _apply_inner(layer, x, bias, ori_dtype)               → Tensor (override for dual-scale)
 
-    Mirrors BaseInt8LinearMethod but with explicit abstract method separation.
+    Extension guide:
+      Single-scale (MXFP8, MXFP4): implement _quantize_activation + _quant_matmul only.
+      Dual-scale (MXFP4 DualScale): override _apply_inner for a different calling convention.
+      Subclasses must NOT override apply() — reshape logic lives here exclusively.
     """
 
     @abstractmethod
-    def _quantize_activation(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Quantize 2-D activation to MXFP format. Returns (x_quantized, x_scale)."""
+    def _quantize_activation(self, x: torch.Tensor) -> tuple:
+        """Quantize 2-D activation. Return arity must match what _apply_inner expects."""
 
     @abstractmethod
     def _quant_matmul(
@@ -260,21 +266,36 @@ class MXFPLinearMethodBase(LinearMethodBase, ABC):
     ) -> torch.Tensor:
         """Fused MXFP quantized GEMM. Weight and scale accessed from layer."""
 
+    def _apply_inner(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None,
+        ori_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Default single-scale inner loop: 2-tuple quantize → matmul.
+
+        Override this (not apply()) when a different quantize/matmul convention
+        is needed, e.g. dual-scale variants that return a 3-tuple from
+        _quantize_activation and pass extra tensors to _quant_matmul.
+        """
+        x_q, x_scale = self._quantize_activation(x)
+        return self._quant_matmul(x_q, x_scale, layer, bias, ori_dtype)
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Shared apply skeleton for all MXFP variants (online and offline)."""
+        """Shared apply skeleton: reshape → _apply_inner → unreshape.
+
+        Do NOT override this method. Override _apply_inner() instead.
+        """
         ori_shape = x.shape
         ori_dtype = x.dtype
-
-        # Flatten to 2-D before GEMM; reshape back afterwards.
         x = x.reshape(-1, ori_shape[-1])
-
-        x_q, x_scale = self._quantize_activation(x)
-        output = self._quant_matmul(x_q, x_scale, layer, bias, ori_dtype)
+        output = self._apply_inner(layer, x, bias, ori_dtype)
         return output.reshape(*ori_shape[:-1], -1)
 
 
@@ -287,11 +308,10 @@ class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
     """NPU W8A8 MXFP8 offline linear method for pre-quantized checkpoints.
 
     Weight canonical layout after process_weights_after_loading:
-      weight      : (K, N) in float8_e4m3fn   (pre-transposed for GEMM)
-      weight_scale: (S/2, N, 2) in float8_e8m0fnu  (reshaped + pre-transposed)
+      weight      : (K, N)              float8_e4m3fn   – pre-transposed for GEMM
+      weight_scale: (K_groups/2, N, 2)  float8_e8m0fnu  – reshaped + pre-transposed
 
-    NPUMxfp8OnlineLinearMethod normalizes to the same layout, so apply() and
-    _quant_matmul() are fully shared between online and offline paths.
+    NPUMxfp8OnlineLinearMethod normalises to the same layout so apply() is shared.
     """
 
     def __init__(self, quant_config: DiffusionMXFP8Config) -> None:
@@ -318,41 +338,53 @@ class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        # Weight: BF16 placeholder; cast to float8_e4m3fn in process_weights.
-        weight = ModelWeightParameter(
-            data=torch.empty(output_size_per_partition, input_size_per_partition, dtype=params_dtype),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
+        layer.register_parameter(
+            "weight",
+            ModelWeightParameter(
+                data=torch.empty(output_size_per_partition, input_size_per_partition, dtype=params_dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            ),
         )
-        layer.register_parameter("weight", weight)
 
-        # Scale: (N, K//32) per-group MX scale; sharded along output (N) for TP.
+        # Scale stored as uint8 in safetensors (float8_e8m0fnu is same bit width).
+        # Using uint8 avoids a lossy float32 round-trip when loading the checkpoint.
         num_groups = (input_size_per_partition + 31) // 32
-        scale = ModelWeightParameter(
-            data=torch.empty(output_size_per_partition, num_groups, dtype=torch.float32),
-            input_dim=None,
-            output_dim=0,
-            weight_loader=weight_loader,
+        layer.register_parameter(
+            "weight_scale",
+            ModelWeightParameter(
+                data=torch.empty(output_size_per_partition, num_groups, dtype=torch.uint8),
+                input_dim=None,
+                output_dim=0,
+                weight_loader=weight_loader,
+            ),
         )
-        layer.register_parameter("weight_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        """Cast checkpoint weight to FP8 and normalize to canonical GEMM layout."""
+        """Cast checkpoint weight to FP8 and normalise to canonical GEMM layout."""
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
         torch_npu = _get_torch_npu()
 
-        # NPU: cast to float8_e4m3fn if needed, then transpose (N,K) → (K,N).
+        # Weight: BF16 → float8_e4m3fn via npu_dtype_cast, then transpose (N,K) → (K,N).
         w = layer.weight
         if w.dtype != torch_npu.float8_e4m3fn:
             w = torch_npu.npu_dtype_cast(w.npu(), torch_npu.float8_e4m3fn)
         w = w.transpose(0, 1).contiguous()
 
-        # Normalize scale: (N, S) → (N, S/2, 2) → (S/2, N, 2).
-        s = layer.weight_scale.to(torch_npu.float8_e8m0fnu)
-        s = s.reshape(s.shape[0], -1, 2).transpose(0, 1).contiguous()
+        # Scale: checkpoint stores uint8 bytes that ARE float8_e8m0fnu bits.
+        # Only convert if neither uint8 nor the target NPU dtype already.
+        # Pad K_groups to even so the (K_groups/2, N, 2) reshape is always valid.
+        s = layer.weight_scale.data
+        if s.dtype not in (torch.uint8, torch_npu.float8_e8m0fnu):
+            s = s.to(torch_npu.float8_e8m0fnu)
+        N, K_groups = s.shape
+        if K_groups % 2 == 1:
+            s = torch.cat([s, torch.zeros(N, 1, dtype=s.dtype, device=s.device)], dim=1)
+            K_groups += 1
+        s = s.reshape(N, K_groups // 2, 2).transpose(0, 1).contiguous()
 
         replace_parameter(layer, "weight", w)
         replace_parameter(layer, "weight_scale", s)
