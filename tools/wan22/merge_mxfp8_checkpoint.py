@@ -128,17 +128,21 @@ def _remap_keys(state_dict: dict, quant_meta: dict) -> tuple[dict, dict]:
     return new_state, new_meta
 
 
-def _load_quant_safetensors(directory: pathlib.Path) -> dict:
-    candidates = sorted(directory.glob("quant_model_weight*.safetensors"))
+def _load_safetensors(directory: pathlib.Path, glob: str = "*.safetensors") -> dict:
+    candidates = sorted(directory.glob(glob))
     if not candidates:
-        # Fallback: any safetensors file in the directory
-        candidates = sorted(directory.glob("*.safetensors"))
-    if not candidates:
-        raise FileNotFoundError(f"No safetensors found in {directory}")
+        raise FileNotFoundError(f"No safetensors matching '{glob}' found in {directory}")
     state_dict = {}
     for f in candidates:
         state_dict.update(load_file(str(f)))
     return state_dict
+
+
+def _load_quant_safetensors(directory: pathlib.Path) -> dict:
+    try:
+        return _load_safetensors(directory, "quant_model_weight*.safetensors")
+    except FileNotFoundError:
+        return _load_safetensors(directory, "*.safetensors")
 
 
 def _load_quant_meta(directory: pathlib.Path) -> dict:
@@ -164,18 +168,30 @@ def _convert_transformer(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"  Loading quantized weights from {quant_subdir} …")
-    state_dict = _load_quant_safetensors(quant_subdir)
-    quant_meta = _load_quant_meta(quant_subdir)
-    print(f"  {len(state_dict)} tensors, {len(quant_meta)} meta entries")
+    # Load original BF16 weights as the merge base so that tensors msModelSlim
+    # omits (biases, norms, embeddings) are preserved without gaps.
+    print(f"  Loading original BF16 weights from {original_transformer_dir} …")
+    base_state_dict = _load_safetensors(original_transformer_dir)
+    print(f"  {len(base_state_dict)} BF16 tensors loaded")
 
-    # Rename keys
-    state_dict, quant_meta = _remap_keys(state_dict, quant_meta)
+    print(f"  Loading quantized weights from {quant_subdir} …")
+    quant_state_dict = _load_quant_safetensors(quant_subdir)
+    quant_meta = _load_quant_meta(quant_subdir)
+    print(f"  {len(quant_state_dict)} quant tensors, {len(quant_meta)} meta entries")
+
+    # Rename keys from msModelSlim convention to diffusers convention
+    quant_state_dict, quant_meta = _remap_keys(quant_state_dict, quant_meta)
+
+    # Overlay: start from BF16 base, then apply all msModelSlim tensors on top.
+    # Quantized weight tensors + their scale tensors override the BF16 originals.
+    # Non-quantized tensors that msModelSlim emits (FLOAT in quant_meta) keep the
+    # msModelSlim copy; any tensor msModelSlim omits is retained from the BF16 base.
+    merged = {**base_state_dict, **quant_state_dict}
 
     # Save merged safetensors
     out_weights = output_dir / "diffusion_pytorch_model.safetensors"
-    save_file(state_dict, str(out_weights))
-    print(f"  Saved weights → {out_weights}")
+    save_file(merged, str(out_weights))
+    print(f"  Saved {len(merged)} tensors → {out_weights}")
 
     # Save renamed quant metadata (optional, for reference)
     out_meta = output_dir / "quant_model_description.json"

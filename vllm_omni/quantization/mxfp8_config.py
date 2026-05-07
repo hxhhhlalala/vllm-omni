@@ -124,8 +124,7 @@ class DiffusionMXFP8Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> DiffusionMXFP8Config:
-        quant_method = cls.get_from_keys_or(config, ["quant_method"], "")
-        is_serialized = "mxfp8" in str(quant_method).lower()
+        is_serialized = cls.get_from_keys_or(config, ["is_checkpoint_mxfp8_serialized"], False)
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(config, ["modules_to_not_convert"], None)

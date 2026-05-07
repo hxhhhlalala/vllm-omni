@@ -159,20 +159,35 @@ def create_transformer_from_config(
     # Auto-detect quantization from transformer's config.json when not explicitly provided.
     # merge_mxfp8_checkpoint.py injects quantization_config into config.json so that
     # offline quantized checkpoints are recognized here without a CLI flag.
-    if quant_config is None and "quantization_config" in config:
+    if "quantization_config" in config:
         from vllm_omni.quantization.factory import build_quant_config
 
         disk_qc = config["quantization_config"]
         if isinstance(disk_qc, dict) and "quant_method" in disk_qc:
             qc_method = disk_qc["quant_method"]
             qc_kwargs = {k: v for k, v in disk_qc.items() if k != "quant_method"}
-            quant_config = build_quant_config(qc_method, **qc_kwargs)
-            logger.info(
-                "Auto-detected quantization from transformer config.json: method=%s kwargs=%s",
-                qc_method,
-                qc_kwargs,
-            )
-        elif isinstance(disk_qc, str):
+            if quant_config is None:
+                # No CLI flag: full auto-detection.
+                quant_config = build_quant_config(qc_method, **qc_kwargs)
+                logger.info(
+                    "Auto-detected quantization from transformer config.json: method=%s kwargs=%s",
+                    qc_method,
+                    qc_kwargs,
+                )
+            elif (
+                qc_kwargs.get("is_checkpoint_mxfp8_serialized", False)
+                and hasattr(quant_config, "is_checkpoint_mxfp8_serialized")
+                and not quant_config.is_checkpoint_mxfp8_serialized
+            ):
+                # CLI provided online mode (--quantization mxfp8) but config.json
+                # marks this as a pre-quantized offline checkpoint. The checkpoint
+                # annotation takes precedence so that users can pass --quantization
+                # mxfp8 without knowing the online/offline distinction.
+                quant_config = build_quant_config(qc_method, **qc_kwargs)
+                logger.info(
+                    "config.json marks checkpoint as serialized; switching from online to offline MXFP8 mode.",
+                )
+        elif isinstance(disk_qc, str) and quant_config is None:
             quant_config = build_quant_config(disk_qc)
             logger.info(
                 "Auto-detected quantization from transformer config.json: method=%s",
