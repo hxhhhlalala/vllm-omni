@@ -16,11 +16,11 @@ type has a different quantization scope.
 
 | Device | FP8 W8A8 | Int8 W8A8 | ModelOpt | MXFP8 W8A8 | GGUF | AutoRound | msModelSlim |
 |--------|----------|-----------|----------|------------|------|-----------|-------------|
-| NVIDIA Blackwell GPU (SM 100+) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
-| NVIDIA Ada/Hopper GPU (SM 89+) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
-| NVIDIA Ampere GPU (SM 80+) | ✅ | ✅ | ⭕ | ❌ | ✅ | ✅ | ❌ |
-| AMD ROCm | ⭕ | ⭕ | ⭕ | ❌ | ⭕ | ⭕ | ❌ |
-| Intel XPU | ⭕ | ⭕ | ⭕ | ❌ | ⭕ | ✅ | ❌ |
+| NVIDIA Blackwell GPU (SM 100+) | ✅ | ✅ | ✅ | ⭕ | ✅ | ✅ | ❌ |
+| NVIDIA Ada/Hopper GPU (SM 89+) | ✅ | ✅ | ✅ | ⭕ | ✅ | ✅ | ❌ |
+| NVIDIA Ampere GPU (SM 80+) | ✅ | ✅ | ⭕ | ⭕ | ✅ | ✅ | ❌ |
+| AMD ROCm | ⭕ | ⭕ | ⭕ | ⭕ | ⭕ | ⭕ | ❌ |
+| Intel XPU | ⭕ | ⭕ | ⭕ | ⭕ | ⭕ | ✅ | ❌ |
 | Ascend NPU | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
 
 Legend: `✅` supported, `❌` unsupported, `⭕` not verified in this

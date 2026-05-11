@@ -174,15 +174,26 @@ def create_transformer_from_config(
                     qc_method,
                     qc_kwargs,
                 )
+            elif quant_config.get_name() != qc_method:
+                # The caller supplied a quant_config of a different method than
+                # what the checkpoint was built with. Loading serialized tensors
+                # (e.g. MXFP8 weight scales) with the wrong linear method would
+                # produce corrupt output or a shape mismatch crash.  Reject early
+                # so the user gets a clear message instead of a silent failure.
+                raise ValueError(
+                    f"Checkpoint config.json declares quant_method={qc_method!r} but the "
+                    f"active quantization config is {quant_config.get_name()!r}. "
+                    "Pass a matching --quantization flag or omit it for auto-detection."
+                )
             elif (
                 qc_kwargs.get("is_checkpoint_mxfp8_serialized", False)
                 and hasattr(quant_config, "is_checkpoint_mxfp8_serialized")
                 and not quant_config.is_checkpoint_mxfp8_serialized
             ):
-                # CLI provided online mode (--quantization mxfp8) but config.json
-                # marks this as a pre-quantized offline checkpoint. The checkpoint
-                # annotation takes precedence so that users can pass --quantization
-                # mxfp8 without knowing the online/offline distinction.
+                # Same method: CLI provided online mode but config.json marks this
+                # as a pre-quantized offline checkpoint.  Switch to offline mode so
+                # users can pass --quantization mxfp8 without knowing the
+                # online/offline distinction.
                 quant_config = build_quant_config(qc_method, **qc_kwargs)
                 logger.info(
                     "config.json marks checkpoint as serialized; switching from online to offline MXFP8 mode.",
