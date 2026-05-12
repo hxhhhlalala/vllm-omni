@@ -109,7 +109,7 @@ subdirectories: `high_noise_model/` and `low_noise_model/`.
 
 #### Step 2 — Preprocess with merge_mxfp8_checkpoint.py
 
-The script (`tools/wan22/merge_mxfp8_checkpoint.py`):
+The script (`vllm_omni/quantization/tools/merge_mxfp8_checkpoint.py`):
 
 1. Copies the original diffusers model to `--output-path` (VAE, text encoder,
    scheduler, etc. are preserved).
@@ -122,7 +122,7 @@ For cascade MoE models, steps 2–4 run separately for `high_noise_model/` →
 `transformer/` and `low_noise_model/` → `transformer_2/`.
 
 ```bash
-python tools/wan22/merge_mxfp8_checkpoint.py \
+python vllm_omni/quantization/tools/merge_mxfp8_checkpoint.py \
   --model-type     Wan2.2-TI2V-5B \
   --original-model /path/to/Wan2.2-TI2V-5B-Diffusers \
   --quant-path     /path/to/wan2_2_ti2v_quantized_raw \

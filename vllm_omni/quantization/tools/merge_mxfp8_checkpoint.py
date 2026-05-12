@@ -19,7 +19,7 @@ Supported model types:
   - Wan2.2-TI2V-5B    (single transformer)
 
 Usage:
-  python merge_mxfp8_checkpoint.py \\
+  python vllm_omni/quantization/tools/merge_mxfp8_checkpoint.py \\
       --model-type      Wan2.2-T2V-A14B \\
       --original-model  /path/to/Wan2.2-T2V-A14B-Diffusers \\
       --quant-path      /path/to/quant-output \\
