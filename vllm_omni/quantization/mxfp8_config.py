@@ -62,22 +62,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Lazily imported to avoid hard dependency on NPU at module load time.
-_torch_npu = None
-
-
-def _get_torch_npu():
-    global _torch_npu
-    if _torch_npu is None:
-        try:
-            import torch_npu as _tnpu
-
-            _torch_npu = _tnpu
-        except ImportError as e:
-            raise ImportError("DiffusionMXFP8Config requires torch_npu. Please install the Ascend NPU toolkit.") from e
-    return _torch_npu
-
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -365,7 +349,7 @@ class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        torch_npu = _get_torch_npu()
+        import torch_npu
 
         # Weight: BF16 → float8_e4m3fn via npu_dtype_cast, then transpose (N,K) → (K,N).
         w = layer.weight
@@ -392,7 +376,7 @@ class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
     # --- NPU MXFP8 ops — shared with online path via inheritance ---
 
     def _quantize_activation(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        torch_npu = _get_torch_npu()
+        import torch_npu
         return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float8_e4m3fn)
 
     def _quant_matmul(
@@ -403,7 +387,7 @@ class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
         bias: torch.Tensor | None,
         ori_dtype: torch.dtype,
     ) -> torch.Tensor:
-        torch_npu = _get_torch_npu()
+        import torch_npu
         # NPU npu_quant_matmul requires bias in float32.
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
@@ -440,7 +424,7 @@ class NPUMxfp8OnlineLinearMethod(_LazyWeightMixin, NPUMxfp8LinearMethod):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        torch_npu = _get_torch_npu()
+        import torch_npu
 
         # Materialise weight if still on meta device (dummy-weight init path).
         if layer.weight.device == torch.device("meta"):
