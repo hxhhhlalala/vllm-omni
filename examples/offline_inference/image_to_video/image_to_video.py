@@ -222,8 +222,8 @@ def parse_args() -> argparse.Namespace:
         "--quantization",
         type=str,
         default=None,
-        choices=["fp8", "mxfp8", "int8", "gguf"],
-        help="Quantization method for the transformer. mxfp8: W8A8 MXFP8 online quant (NPU). fp8: online FP8 (GPU).",
+        choices=["fp8", "mxfp8", "mxfp4", "mxfp8_mxfp4_dualscale", "int8", "gguf"],
+        help="Quantization method for the transformer. mxfp8: W8A8 MXFP8 (NPU). mxfp4: W4A4 MXFP4 (NPU). mxfp8_mxfp4_dualscale: mixed MXFP8+MXFP4 dual-scale (NPU). fp8: online FP8 (GPU).",
     )
     parser.add_argument(
         "--enable-diffusion-pipeline-profiler",

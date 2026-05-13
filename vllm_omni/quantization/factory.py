@@ -48,6 +48,20 @@ def _build_mxfp8(**kw: Any) -> QuantizationConfig:
     return DiffusionMXFP8Config(**kw)
 
 
+def _build_mxfp4(**kw: Any) -> QuantizationConfig:
+    """Lazy import for W4A4 MXFP4 diffusion config (NPU only)."""
+    from .mxfp4_config import DiffusionMXFP4Config
+
+    return DiffusionMXFP4Config(**kw)
+
+
+def _build_mxfp8_mxfp4_dualscale(**kw: Any) -> QuantizationConfig:
+    """Lazy import for MXFP8 (early blocks) + MXFP4 dual-scale (later blocks) config (NPU only)."""
+    from .mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+
+    return DiffusionMXFP8MXFP4DualScaleConfig(**kw)
+
+
 def _build_inc(**kw: Any) -> QuantizationConfig:
     """Lazy import for INC/AutoRound config with checkpoint kwarg normalization."""
     from .inc_config import OmniINCConfig
@@ -66,6 +80,8 @@ _OVERRIDES: dict[str, Callable[..., QuantizationConfig]] = {
     "gguf": _build_gguf,
     "int8": _build_int8,
     "mxfp8": _build_mxfp8,
+    "mxfp4": _build_mxfp4,
+    "mxfp8_mxfp4_dualscale": _build_mxfp8_mxfp4_dualscale,
     "inc": _build_inc,
     "auto-round": _build_inc,
     "auto_round": _build_inc,
