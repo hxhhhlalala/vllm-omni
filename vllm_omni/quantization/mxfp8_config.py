@@ -377,6 +377,7 @@ class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
 
     def _quantize_activation(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         import torch_npu
+
         return torch_npu.npu_dynamic_mx_quant(x, dst_type=torch_npu.float8_e4m3fn)
 
     def _quant_matmul(
@@ -388,6 +389,7 @@ class NPUMxfp8LinearMethod(MXFPLinearMethodBase):
         ori_dtype: torch.dtype,
     ) -> torch.Tensor:
         import torch_npu
+
         # NPU npu_quant_matmul requires bias in float32.
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
