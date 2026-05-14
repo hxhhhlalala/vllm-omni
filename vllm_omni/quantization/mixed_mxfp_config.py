@@ -79,7 +79,7 @@ class DiffusionMXFP8MXFP4DualScaleConfig(QuantizationConfig):
 
     def __init__(
         self,
-        num_mxfp8_blocks: int,
+        num_mxfp8_blocks: int = 0,
         is_checkpoint_serialized: bool = False,
         ignored_layers: list[str] | None = None,
     ) -> None:

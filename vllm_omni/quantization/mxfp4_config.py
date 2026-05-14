@@ -549,7 +549,7 @@ class NPUMxfp4DualScaleOnlineLinearMethod(_LazyWeightMixin, NPUMxfp4DualScaleLin
         ds = w_l0_scale.reshape(w_l0_scale.shape[0], -1).transpose(0, 1).contiguous()
 
         # No calibration available: identity pre-scale (no smooth quantization effect).
-        ms = torch.ones(layer.input_size_per_partition, dtype=torch.float32, device="npu")
+        ms = torch.ones(layer.input_size_per_partition, dtype=torch.bfloat16, device="npu")
 
         replace_parameter(layer, "weight", w)
         replace_parameter(layer, "weight_scale", s)
