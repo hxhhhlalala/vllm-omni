@@ -36,7 +36,9 @@ direct-load else branch entirely.
 Supported model types:
   - Wan2.2-T2V-A14B  (MoE cascade: transformer + transformer_2)
   - Wan2.2-I2V-A14B  (MoE cascade: transformer + transformer_2)
-  - Wan2.2-TI2V-5B   (single transformer)
+
+Note: Wan2.2-TI2V-5B is NOT supported. Its smaller parameter count causes
+unacceptable accuracy loss under W4A4 quantization. Use MXFP8 for TI2V-5B.
 
 Usage:
   python merge_mxfp4_dualscale_checkpoint.py \\
@@ -105,7 +107,7 @@ TRANSFORMER_KEYS_RENAME_DICT: dict[str, str] = {
     "img_emb.emb_pos": "condition_embedder.image_embedder.pos_embed",
 }
 
-SUPPORTED_MODEL_TYPES = ["Wan2.2-T2V-A14B", "Wan2.2-I2V-A14B", "Wan2.2-TI2V-5B"]
+SUPPORTED_MODEL_TYPES = ["Wan2.2-T2V-A14B", "Wan2.2-I2V-A14B"]
 CASCADE_MODEL_TYPES = {"Wan2.2-T2V-A14B", "Wan2.2-I2V-A14B"}
 
 # Suffixes that appear inside .linear.* wrapper for MXFP4 tensors.
