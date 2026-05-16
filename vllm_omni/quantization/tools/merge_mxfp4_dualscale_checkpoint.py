@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Merge mixed MXFP8 + W4A4_MXFP4_DUALSCALE quantized Wan2.2 weights into HF Diffusers format.
+"""Merge W4A4_MXFP4_DUALSCALE quantized Wan2.2 weights into HF Diffusers format.
 
-msModelSlim produces a mixed-precision checkpoint where transformer blocks are split into:
-  - Early blocks (0..num_mxfp8_blocks-1): W8A8_MXFP8
-  - Remaining blocks (num_mxfp8_blocks..): W4A4_MXFP4_DUALSCALE
+msModelSlim produces a checkpoint where each linear layer is either:
+  - W4A4_MXFP4_DUALSCALE: quantized weights with fine/coarse scales and mul_scale
+  - FLOAT (BF16 fallback): kept as original BF16 weights for precision-sensitive layers
 
-MXFP4_DUALSCALE key structure per linear layer
------------------------------------------------
+BF16 fallback layers may be interleaved anywhere in the transformer (not just leading
+blocks). The merge script detects them from quant_model_description.json and writes
+their prefixes into config.json as ignored_layers so the runtime dynamically routes
+each layer to the correct quantization method at weight-loading time.
+
+MXFP4_DUALSCALE key structure per linear layer (msModelSlim naming)
+---------------------------------------------------------------------
   blocks.N.X.linear.weight             W4A4_MXFP4_DUALSCALE  – int8 (FP4 packed)
   blocks.N.X.linear.weight_scale       W4A4_MXFP4_DUALSCALE  – uint8 (float8_e8m0fnu fine scale, per-32K)
   blocks.N.X.linear.weight_dual_scale  W4A4_MXFP4_DUALSCALE  – float32 (coarse scale, per-512K)
   blocks.N.X.linear.bias               FLOAT                  – bias (if present)
   blocks.N.X.div.mul_scale             FLOAT                  – float32 per-input-channel activation pre-scale
 
-MXFP8 key structure (no wrapper, same as merge_mxfp8_checkpoint.py):
-  blocks.N.X.weight                    W8A8_MXFP8
-  blocks.N.X.weight_scale              W8A8_MXFP8
+BF16 fallback key structure (no wrappers, plain linear weights):
+  blocks.N.X.weight                    FLOAT
+  condition_embedder.*.weight          FLOAT  (always BF16 — not quantized)
 
 Self-attention QKV notes
 ------------------------
@@ -45,8 +50,7 @@ Usage:
       --model-type        Wan2.2-T2V-A14B \\
       --original-model    /path/to/Wan2.2-T2V-A14B-Diffusers \\
       --quant-path        /path/to/msmodelslim-output \\
-      --output-path       /path/to/merged-output \\
-      --num-mxfp8-blocks  5          # auto-detected if omitted
+      --output-path       /path/to/merged-output
 """
 
 from __future__ import annotations
@@ -56,7 +60,6 @@ import json
 import pathlib
 import re
 import shutil
-import warnings
 from typing import Any
 
 import torch
@@ -209,43 +212,6 @@ def _print_block_summary(block_types: dict[int, str]) -> None:
         print(f"    blocks {range_str:>8}: {btype}  ({count} block{'s' if count > 1 else ''})")
 
 
-def _detect_num_mxfp8_blocks(quant_meta: dict[str, str]) -> int:
-    """Count leading MXFP8 blocks (blocks 0..N-1).
-
-    Two cases handled:
-    - MXFP8 blocks present in quant_meta (W8A8_MXFP8 markers):
-      count the consecutive run from block 0.
-    - MXFP8 blocks absent from quant_meta (msModelSlim may omit them):
-      the index of the first MXFP4_DUALSCALE block equals num_mxfp8_blocks,
-      because all blocks before it are implicitly MXFP8.
-    """
-    block_types = _classify_blocks(quant_meta)
-    if not block_types:
-        return 0
-
-    sorted_indices = sorted(block_types)
-    first_idx = sorted_indices[0]
-
-    if block_types[first_idx] == _MXFP8_TYPE:
-        # MXFP8 blocks present: count consecutive run starting at block 0.
-        if first_idx != 0:
-            warnings.warn(
-                f"First classified block is {first_idx} (expected 0); "
-                "cannot determine num_mxfp8_blocks reliably. Returning 0."
-            )
-            return 0
-        count = 0
-        for idx in sorted_indices:
-            if block_types[idx] == _MXFP8_TYPE:
-                count += 1
-            else:
-                break
-        return count
-
-    # MXFP8 blocks absent from quant_meta: the first MXFP4 block index is the boundary.
-    return first_idx
-
-
 # ---------------------------------------------------------------------------
 # Safetensors I/O
 # ---------------------------------------------------------------------------
@@ -282,16 +248,80 @@ def _load_quant_meta(directory: pathlib.Path) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _is_mxfp4_tensor(key: str, qtype: str) -> bool:
+    """Return True for MXFP4 quantized tensors and their companion tensors.
+
+    MXFP4 DualScale layers produce four tensor types:
+      .linear.weight / .linear.weight_scale / .linear.weight_dual_scale (W4A4_MXFP4_DUALSCALE)
+      .linear.bias / .div.mul_scale (FLOAT but companion to a quantized layer)
+
+    BF16 fallback layers have plain .weight / .bias without .linear. / .div. wrappers.
+    """
+    if qtype.startswith("W4A4_MXFP4_DUALSCALE"):
+        return True
+    # Companion tensors: bias and mul_scale that belong to an MXFP4 layer.
+    return ".linear." in key or ".div.mul_scale" in key
+
+
+def _diffusers_to_vllm_ignored(diffusers_ignored: list[str]) -> list[str]:
+    """Translate diffusers checkpoint prefixes to vllm-omni model parameter names.
+
+    Three transformations align the naming conventions:
+
+    1. Self-attention QKV fusion (attn1 only, not attn2):
+       attn1.to_q + attn1.to_k + attn1.to_v → attn1.to_qkv
+       Cross-attention (attn2) to_q/k/v are not fused and remain separate.
+
+    2. FFN naming:
+       ffn.net.0.proj  → ffn.net_0.proj
+       ffn.net.2       → ffn.net_2
+
+    3. to_out index:
+       attn1.to_out.0 / attn2.to_out.0  → attn1.to_out / attn2.to_out
+    """
+    ignored_set = set(diffusers_ignored)
+    result: set[str] = set()
+
+    for name in diffusers_ignored:
+        m = re.match(r"^(.*\.attn1)\.to_([qkv])$", name)
+        if m:
+            prefix = m.group(1)
+            if all(f"{prefix}.to_{c}" in ignored_set for c in ("q", "k", "v")):
+                result.add(f"{prefix}.to_qkv")
+            else:
+                result.add(name)
+            continue
+
+        name = re.sub(r"\.ffn\.net\.0\.proj$", ".ffn.net_0.proj", name)
+        name = re.sub(r"\.ffn\.net\.2$", ".ffn.net_2", name)
+        name = re.sub(r"\.to_out\.0$", ".to_out", name)
+        result.add(name)
+
+    return sorted(result)
+
+
+def _collect_ignored_layers(merged: dict[str, Any], mxfp4_layer_prefixes: set[str]) -> list[str]:
+    """Collect vllm-omni parameter name prefixes for BF16 fallback layers.
+
+    A layer is BF16 if it has a .weight tensor but its prefix is not in
+    mxfp4_layer_prefixes. Prefixes are returned in vllm-omni parameter naming
+    (QKV-fused, FFN underscored, to_out unindexed) so the list can be written
+    directly into ignored_layers in config.json without further translation.
+    """
+    all_weight_prefixes = {key[: -len(".weight")] for key in merged if key.endswith(".weight")}
+    return _diffusers_to_vllm_ignored(sorted(all_weight_prefixes - mxfp4_layer_prefixes))
+
+
 def _convert_transformer(
     quant_subdir: pathlib.Path,
     output_dir: pathlib.Path,
     original_transformer_dir: pathlib.Path,
-    num_mxfp8_blocks: int | None,
-) -> int:
-    """Convert one transformer directory. Returns the resolved num_mxfp8_blocks."""
+) -> None:
+    """Convert one transformer directory to the mxfp4_dualscale + BF16 mixed format."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # BF16 base: ensures non-quantized tensors that msModelSlim might omit are present.
+    # BF16 base: provides the scaffold for non-MXFP4 tensors (norms, embeddings,
+    # BF16 fallback linear layers that msModelSlim may omit or keep as FLOAT).
     print(f"  Loading BF16 base from {original_transformer_dir} …")
     base_state = _load_safetensors_dir(original_transformer_dir)
     print(f"  {len(base_state)} BF16 tensors loaded")
@@ -301,53 +331,49 @@ def _convert_transformer(
     quant_meta = _load_quant_meta(quant_subdir)
     print(f"  {len(quant_state)} quant tensors, {len(quant_meta)} meta entries")
 
-    # Classify blocks and auto-detect / validate num_mxfp8_blocks.
+    # Classify blocks for a compact summary (informational only in the new scheme).
     block_types = _classify_blocks(quant_meta)
-    detected = _detect_num_mxfp8_blocks(quant_meta)
-    # Fill in inferred MXFP8 blocks (may be absent from quant_meta).
-    for i in range(detected):
-        block_types.setdefault(i, _MXFP8_TYPE)
     _print_block_summary(block_types)
-    if num_mxfp8_blocks is None:
-        num_mxfp8_blocks = detected
-        print(f"  Auto-detected num_mxfp8_blocks = {num_mxfp8_blocks}")
-    elif num_mxfp8_blocks != detected:
-        warnings.warn(f"--num-mxfp8-blocks={num_mxfp8_blocks} but auto-detected {detected}. Using the provided value.")
 
-    # Remap all quantized keys.
-    # Key transformation is per-block:
-    #   MXFP8 blocks        → rename dict only (no .linear./.div. wrappers)
-    #   MXFP4_DUALSCALE blocks → rename dict + strip .linear./.div. wrappers
-    #   Non-block keys      → rename dict only
+    # Remap MXFP4 quantized tensors only.
+    # BF16 fallback tensors (FLOAT in quant_meta, no .linear./.div. wrapper) are
+    # skipped here; the base_state provides them unchanged.
     remapped: dict[str, torch.Tensor] = {}
     remapped_meta: dict[str, str] = {}
+    mxfp4_layer_prefixes: set[str] = set()
     skipped: list[str] = []
 
     for key, tensor in quant_state.items():
+        qtype = quant_meta.get(key, "FLOAT")
+
+        if not _is_mxfp4_tensor(key, qtype):
+            continue  # BF16 fallback — base_state already covers this tensor
+
         renamed = _apply_rename_dict(key)
+        final_key = _strip_mxfp4_wrapper(renamed)
 
-        block_idx = _parse_block_idx(renamed)
-        if block_idx is not None and block_types.get(block_idx) == _MXFP4_DUALSCALE_TYPE:
-            final_key = _strip_mxfp4_wrapper(renamed)
-        else:
-            final_key = renamed
-
-        # Skip non-tensor metadata keys that msModelSlim sometimes embeds
-        # (e.g. quant_type markers stored as scalar tensors).
         if final_key.endswith(".quant_type"):
             skipped.append(key)
             continue
 
         remapped[final_key] = tensor
-        if key in quant_meta:
-            remapped_meta[final_key] = quant_meta[key]
+        remapped_meta[final_key] = qtype
+
+        # Track MXFP4 layer prefixes (via their .weight keys) for ignored_layers.
+        if final_key.endswith(".weight") and qtype.startswith("W4A4_MXFP4_DUALSCALE"):
+            mxfp4_layer_prefixes.add(final_key[: -len(".weight")])
 
     if skipped:
         print(f"  Skipped {len(skipped)} metadata keys (quant_type markers): {skipped[:5]}")
+    print(f"  {len(remapped)} MXFP4 tensors remapped, {len(mxfp4_layer_prefixes)} quantized layers")
 
-    # Overlay: BF16 base provides the scaffold; quant tensors replace their BF16 counterparts
+    # Merge: base_state provides BF16 scaffold; MXFP4 tensors override their BF16 counterparts
     # and add the new scale tensors (weight_scale, weight_dual_scale, mul_scale).
     merged = {**base_state, **remapped}
+
+    # Determine ignored_layers: BF16 fallback layer prefixes in vllm-omni parameter naming.
+    ignored_layers = _collect_ignored_layers(merged, mxfp4_layer_prefixes)
+    print(f"  {len(ignored_layers)} BF16 fallback layers → ignored_layers in config.json")
 
     # Save weights.
     out_weights = output_dir / "diffusion_pytorch_model.safetensors"
@@ -364,26 +390,20 @@ def _convert_transformer(
     if src_config.is_file():
         with open(src_config) as f:
             config = json.load(f)
-        config["quantization_config"] = _build_quant_config(num_mxfp8_blocks)
+        config["quantization_config"] = _build_quant_config(ignored_layers)
         out_config = output_dir / "config.json"
         with open(out_config, "w") as f:
             json.dump(config, f, indent=2)
-        print(
-            f"  Injected quantization_config "
-            f"(mxfp8_mxfp4_dualscale, num_mxfp8_blocks={num_mxfp8_blocks}) "
-            f"→ {out_config}"
-        )
+        print(f"  Injected quantization_config (mxfp4_dualscale, {len(ignored_layers)} ignored_layers) → {out_config}")
     else:
         print(f"  WARNING: No config.json at {src_config}; quantization_config not injected.")
 
-    return num_mxfp8_blocks
 
-
-def _build_quant_config(num_mxfp8_blocks: int) -> dict[str, Any]:
+def _build_quant_config(ignored_layers: list[str]) -> dict[str, Any]:
     return {
-        "quant_method": "mxfp8_mxfp4_dualscale",
-        "num_mxfp8_blocks": num_mxfp8_blocks,
+        "quant_method": "mxfp4_dualscale",
         "is_checkpoint_serialized": True,
+        "ignored_layers": ignored_layers,
     }
 
 
@@ -413,7 +433,6 @@ def repack(
     original_model_path: pathlib.Path,
     quant_path: pathlib.Path,
     output_path: pathlib.Path,
-    num_mxfp8_blocks: int | None,
 ) -> None:
     transformer_dirs = _get_transformer_dirs(model_type)
 
@@ -429,9 +448,7 @@ def repack(
         out_tdir = output_path / tdir
         orig_tdir = original_model_path / tdir
         print(f"\nConverting {tdir} (quant source: {q_subdir.name}) …")
-        resolved_n = _convert_transformer(q_subdir, out_tdir, orig_tdir, num_mxfp8_blocks)
-        # Use the resolved value for subsequent transformers in the same cascade.
-        num_mxfp8_blocks = resolved_n
+        _convert_transformer(q_subdir, out_tdir, orig_tdir)
 
     print(f"\nDone. Merged model → {output_path}")
     print("\nRun inference (quantization auto-detected from config.json):")
@@ -452,12 +469,6 @@ def main() -> None:
     parser.add_argument("--original-model", required=True, help="Original HF Diffusers model directory (BF16).")
     parser.add_argument("--quant-path", required=True, help="msModelSlim quantized weights directory.")
     parser.add_argument("--output-path", required=True, help="Output directory for merged model.")
-    parser.add_argument(
-        "--num-mxfp8-blocks",
-        type=int,
-        default=None,
-        help=("Number of leading MXFP8 blocks (0..N-1). Auto-detected from quant_model_description.json if omitted."),
-    )
     args = parser.parse_args()
 
     repack(
@@ -465,7 +476,6 @@ def main() -> None:
         original_model_path=pathlib.Path(args.original_model),
         quant_path=pathlib.Path(args.quant_path),
         output_path=pathlib.Path(args.output_path),
-        num_mxfp8_blocks=args.num_mxfp8_blocks,
     )
 
 

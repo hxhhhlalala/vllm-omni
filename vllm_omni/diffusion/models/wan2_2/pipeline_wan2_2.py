@@ -212,19 +212,16 @@ def create_transformer_from_config(
                     qc_method,
                 )
             elif (
-                "num_mxfp8_blocks" in qc_kwargs
-                and hasattr(quant_config, "num_mxfp8_blocks")
-                and qc_kwargs["num_mxfp8_blocks"] != quant_config.num_mxfp8_blocks
+                "ignored_layers" in qc_kwargs
+                and hasattr(quant_config, "ignored_layers")
+                and set(qc_kwargs.get("ignored_layers") or []) != set(quant_config.ignored_layers or [])
             ):
-                # The transformer's own config.json has a different num_mxfp8_blocks than
-                # the active quant_config (e.g. built from a stale enriched config or a
-                # different transformer's config.json in a cascade model). Rebuild from
-                # disk so the block routing is authoritative for this transformer.
+                # mxfp4_dualscale cascade: each transformer may have different BF16 fallback
+                # layers in its config.json.  Rebuild so per-transformer routing is correct.
                 quant_config = build_quant_config(qc_method, **qc_kwargs)
                 logger.info(
-                    "Disk config.json num_mxfp8_blocks=%d differs from active config; "
+                    "Disk config.json ignored_layers differs from active config; "
                     "rebuilding quant_config from transformer config.json.",
-                    qc_kwargs["num_mxfp8_blocks"],
                 )
         elif isinstance(disk_qc, str) and quant_config is None:
             quant_config = build_quant_config(disk_qc)
@@ -461,8 +458,8 @@ class Wan22Pipeline(nn.Module, CFGParallelMixin, ProgressBarMixin, DiffusionPipe
         # the quant_config from the transformer's own config.json and propagate it back to
         # od_config.  This has two effects:
         #   1. The first transformer's auto-detected config is reused by the second transformer
-        #      in cascade models (e.g. Wan2.2-T2V-A14B), preventing stale/wrong num_mxfp8_blocks
-        #      from an independent read of transformer_2/config.json.
+        #      in cascade models (e.g. Wan2.2-T2V-A14B); if the second transformer's config.json
+        #      has different ignored_layers, create_transformer_from_config rebuilds locally.
         #   2. od_config.quantization_config becomes non-None so _check_unloaded_weights can
         #      filter expected quantization suffixes instead of raising on every unloaded param.
         if quant_config is None and "quantization_config" in config:

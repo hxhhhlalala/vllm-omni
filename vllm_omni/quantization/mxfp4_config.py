@@ -10,6 +10,13 @@ Architecture mirrors mxfp8_config.py:
     NPUMxfp4DualScaleLinearMethod         – NPU dual-scale offline (W4A4 MXFP4 DualScale)
       NPUMxfp4DualScaleOnlineLinearMethod – NPU dual-scale online (BF16 → FP4)
 
+Quantization configs:
+
+  DiffusionMXFP4Config            – single-scale online/offline (quant_method="mxfp4")
+  DiffusionMXFP4DualScaleMixedConfig – dual-scale + per-layer BF16 fallback (quant_method="mxfp4_dualscale")
+      Offline: ignored_layers from config.json routes interleaved BF16 layers
+      Online:  num_bf16_fallback_layers leading blocks stay in BF16 (default 5)
+
 Key differences from MXFP8:
 
   1. Precision: float4_e2m1fn_x2 (FP4 packed, 2 values per element).
@@ -42,6 +49,7 @@ Reference: MindIE-SD W4A4MXFP4QuantLinear / W4A4MXFP4DualQuantLinear (mindiesd/q
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -556,3 +564,140 @@ class NPUMxfp4DualScaleOnlineLinearMethod(_LazyWeightMixin, NPUMxfp4DualScaleLin
         replace_parameter(layer, "weight_dual_scale", ds)
         replace_parameter(layer, "mul_scale", ms)
         layer._already_called_process_weights_after_loading = True
+
+
+# ---------------------------------------------------------------------------
+# Block-index helper (shared by DiffusionMXFP4DualScaleMixedConfig)
+# ---------------------------------------------------------------------------
+
+_BLOCK_IDX_RE = re.compile(r"^blocks\.(\d+)\.")
+
+
+def _parse_block_idx(prefix: str) -> int | None:
+    """Extract block index from prefix like 'blocks.5.attn1.to_q'."""
+    m = _BLOCK_IDX_RE.match(prefix)
+    return int(m.group(1)) if m else None
+
+
+# ---------------------------------------------------------------------------
+# Config: MXFP4 DualScale + per-layer BF16 fallback
+# ---------------------------------------------------------------------------
+
+
+class DiffusionMXFP4DualScaleMixedConfig(QuantizationConfig):
+    """W4A4 MXFP4 DualScale with per-layer BF16 fallback for diffusion transformers.
+
+    Sensitive layers fall back to BF16 (original weights) while all other linear
+    layers use W4A4 MXFP4 DualScale.  BF16 fallback layers may be interleaved
+    anywhere in the transformer.
+
+    Offline mode (is_checkpoint_serialized=True):
+        Layers whose prefix appears in ignored_layers → UnquantizedLinearMethod (BF16)
+        All other linear layers → NPUMxfp4DualScaleLinearMethod
+
+        ignored_layers is injected into transformer/config.json by the merge script
+        and contains the prefixes of all non-MXFP4 linear layers.
+
+    Online mode (is_checkpoint_serialized=False):
+        Layer routing applies two rules in priority order:
+          1. ignored_layers (explicit per-layer BF16 override, user-supplied) → BF16
+          2. Blocks 0 .. num_bf16_fallback_layers-1 (coarse leading-block rule) → BF16
+          3. All other linear layers → NPUMxfp4DualScaleOnlineLinearMethod
+
+        num_bf16_fallback_layers defaults to 5 when not specified.
+        Set ignored_layers to pin arbitrary interleaved layers to BF16 without
+        needing an offline checkpoint (useful for accuracy debugging).
+        Layers outside "blocks.N.*" (condition_embedder etc.) always use online MXFP4
+        unless they appear in ignored_layers.
+
+    Config injected by merge_mxfp4_dualscale_checkpoint.py:
+        {
+            "quant_method": "mxfp4_dualscale",
+            "is_checkpoint_serialized": true,
+            "ignored_layers": ["blocks.0.attn1.to_q", ...]
+        }
+    """
+
+    def __init__(
+        self,
+        is_checkpoint_serialized: bool = False,
+        ignored_layers: list[str] | None = None,
+        num_bf16_fallback_layers: int = 5,
+    ) -> None:
+        super().__init__()
+        self.is_checkpoint_serialized = is_checkpoint_serialized
+        self.ignored_layers = ignored_layers or []
+        self.num_bf16_fallback_layers = num_bf16_fallback_layers
+
+    @classmethod
+    def get_name(cls) -> QuantizationMethods:
+        return "mxfp4_dualscale"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.float16]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 80
+
+    @classmethod
+    def get_config_filenames(cls) -> list[str]:
+        return []
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper) -> None:
+        if self.ignored_layers:
+            self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> DiffusionMXFP4DualScaleMixedConfig:
+        is_serialized = cls.get_from_keys_or(config, ["is_checkpoint_serialized"], False)
+        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
+        if not ignored_layers:
+            ignored_layers = cls.get_from_keys_or(config, ["modules_to_not_convert"], None)
+        num_bf16_fallback_layers = cls.get_from_keys_or(config, ["num_bf16_fallback_layers"], 5)
+        return cls(
+            is_checkpoint_serialized=is_serialized,
+            ignored_layers=ignored_layers,
+            num_bf16_fallback_layers=num_bf16_fallback_layers,
+        )
+
+    def get_quant_method(
+        self,
+        layer: torch.nn.Module,
+        prefix: str,
+    ) -> QuantizeMethodBase | None:
+        if not isinstance(layer, LinearBase):
+            return None
+
+        if self.is_checkpoint_serialized:
+            # Offline: ignored_layers lists interleaved BF16 fallback layer prefixes.
+            if is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedLinearMethod()
+            if not current_omni_platform.is_npu():
+                raise NotImplementedError(
+                    "DiffusionMXFP4DualScaleMixedConfig is currently only supported on NPU (Ascend) platforms."
+                )
+            return NPUMxfp4DualScaleLinearMethod(self)
+
+        # Online: explicit ignored_layers take priority (user-specified per-layer BF16 override),
+        # then fall back to the coarse leading-block rule.
+        if is_layer_skipped(
+            prefix=prefix,
+            ignored_layers=self.ignored_layers,
+            fused_mapping=self.packed_modules_mapping,
+        ):
+            return UnquantizedLinearMethod()
+        block_idx = _parse_block_idx(prefix)
+        if block_idx is not None and block_idx < self.num_bf16_fallback_layers:
+            return UnquantizedLinearMethod()
+
+        if not current_omni_platform.is_npu():
+            raise NotImplementedError(
+                "DiffusionMXFP4DualScaleMixedConfig is currently only supported on NPU (Ascend) platforms."
+            )
+        return NPUMxfp4DualScaleOnlineLinearMethod(self)

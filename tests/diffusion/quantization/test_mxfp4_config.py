@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MXFP4 quantization configs and the mixed MXFP8+MXFP4 config."""
+"""Tests for MXFP4 quantization configs and the MXFP4 DualScale + BF16 mixed config."""
 
 import pytest
 
@@ -49,57 +49,6 @@ def test_mxfp4_config_from_config_modules_to_not_convert_fallback():
 
 
 # ---------------------------------------------------------------------------
-# DiffusionMXFP8MXFP4DualScaleConfig
-# ---------------------------------------------------------------------------
-
-
-def test_mixed_config_get_name():
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
-
-    assert DiffusionMXFP8MXFP4DualScaleConfig.get_name() == "mxfp8_mxfp4_dualscale"
-
-
-def test_mixed_config_no_args_does_not_raise():
-    """DiffusionMXFP8MXFP4DualScaleConfig() with no args must not raise TypeError."""
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
-
-    cfg = DiffusionMXFP8MXFP4DualScaleConfig()
-    assert cfg.num_mxfp8_blocks == 0
-    assert cfg.is_checkpoint_serialized is False
-    assert cfg.ignored_layers == []
-
-
-def test_mixed_config_from_config_with_num_blocks():
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
-
-    cfg = DiffusionMXFP8MXFP4DualScaleConfig.from_config(
-        {
-            "quant_method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 5,
-            "is_checkpoint_serialized": True,
-        }
-    )
-    assert cfg.num_mxfp8_blocks == 5
-    assert cfg.is_checkpoint_serialized is True
-    assert cfg.ignored_layers == []
-
-
-def test_mixed_config_from_config_defaults():
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
-
-    cfg = DiffusionMXFP8MXFP4DualScaleConfig.from_config({})
-    assert cfg.num_mxfp8_blocks == 0
-    assert cfg.is_checkpoint_serialized is False
-
-
-def test_mixed_config_from_config_ignored_layers():
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
-
-    cfg = DiffusionMXFP8MXFP4DualScaleConfig.from_config({"num_mxfp8_blocks": 3, "ignored_layers": ["proj_out"]})
-    assert cfg.ignored_layers == ["proj_out"]
-
-
-# ---------------------------------------------------------------------------
 # build_quant_config integration
 # ---------------------------------------------------------------------------
 
@@ -123,81 +72,40 @@ def test_build_quant_config_mxfp4_dict():
     assert cfg.is_checkpoint_mxfp4_serialized is True
 
 
-def test_build_quant_config_mxfp8_mxfp4_dualscale_dict():
+def test_build_quant_config_mxfp4_dualscale_string():
     from vllm_omni.quantization import build_quant_config
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = build_quant_config("mxfp4_dualscale")
+    assert isinstance(cfg, DiffusionMXFP4DualScaleMixedConfig)
+    assert cfg.is_checkpoint_serialized is False
+    assert cfg.num_bf16_fallback_layers == 5
+    assert cfg.ignored_layers == []
+
+
+def test_build_quant_config_mxfp4_dualscale_dict_offline():
+    from vllm_omni.quantization import build_quant_config
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
     cfg = build_quant_config(
         {
-            "method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 5,
+            "method": "mxfp4_dualscale",
             "is_checkpoint_serialized": True,
+            "ignored_layers": ["blocks.0.attn1.to_q", "blocks.0.attn1.to_k"],
         }
     )
-    assert isinstance(cfg, DiffusionMXFP8MXFP4DualScaleConfig)
-    assert cfg.num_mxfp8_blocks == 5
+    assert isinstance(cfg, DiffusionMXFP4DualScaleMixedConfig)
     assert cfg.is_checkpoint_serialized is True
+    assert cfg.ignored_layers == ["blocks.0.attn1.to_q", "blocks.0.attn1.to_k"]
 
 
-def test_build_quant_config_mxfp8_mxfp4_dualscale_warns_without_num_blocks(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """build_quant_config('mxfp8_mxfp4_dualscale') must emit WARNING when
-    num_mxfp8_blocks is absent and default to 0 (all-MXFP4 DualScale mode).
-
-    Uses monkeypatch instead of caplog because vllm's init_logger may configure
-    propagation in a way that prevents caplog from intercepting the messages.
-    """
-    import vllm_omni.quantization.factory as factory_module
+def test_build_quant_config_mxfp4_dualscale_dict_online_custom_fallback():
     from vllm_omni.quantization import build_quant_config
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
-    warning_messages: list[str] = []
-    monkeypatch.setattr(
-        factory_module.logger,
-        "warning",
-        lambda msg, *args, **kw: warning_messages.append(msg),
-    )
-
-    cfg = build_quant_config("mxfp8_mxfp4_dualscale")
-
-    assert isinstance(cfg, DiffusionMXFP8MXFP4DualScaleConfig)
-    assert cfg.num_mxfp8_blocks == 0
-    assert len(warning_messages) >= 1
-    assert any("num_mxfp8_blocks" in msg for msg in warning_messages)
-
-
-def test_build_quant_config_mxfp8_mxfp4_dualscale_info_with_num_blocks(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """When num_mxfp8_blocks is provided, INFO is logged and no WARNING is emitted."""
-    import vllm_omni.quantization.factory as factory_module
-    from vllm_omni.quantization import build_quant_config
-
-    warning_messages: list[str] = []
-    info_messages: list[str] = []
-    monkeypatch.setattr(
-        factory_module.logger,
-        "warning",
-        lambda msg, *args, **kw: warning_messages.append(msg),
-    )
-    monkeypatch.setattr(
-        factory_module.logger,
-        "info",
-        lambda msg, *args, **kw: info_messages.append(msg),
-    )
-
-    cfg = build_quant_config(
-        {
-            "method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 5,
-            "is_checkpoint_serialized": True,
-        }
-    )
-
-    assert cfg.num_mxfp8_blocks == 5
-    assert len(warning_messages) == 0
-    assert any("num_mxfp8_blocks" in msg for msg in info_messages)
+    cfg = build_quant_config({"method": "mxfp4_dualscale", "num_bf16_fallback_layers": 10})
+    assert isinstance(cfg, DiffusionMXFP4DualScaleMixedConfig)
+    assert cfg.num_bf16_fallback_layers == 10
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +114,7 @@ def test_build_quant_config_mxfp8_mxfp4_dualscale_info_with_num_blocks(
 
 
 def test_parse_block_idx_valid():
-    from vllm_omni.quantization.mixed_mxfp_config import _parse_block_idx
+    from vllm_omni.quantization.mxfp4_config import _parse_block_idx
 
     assert _parse_block_idx("blocks.0.attn1.to_q") == 0
     assert _parse_block_idx("blocks.5.ffn.net.0.proj") == 5
@@ -215,7 +123,7 @@ def test_parse_block_idx_valid():
 
 def test_parse_block_idx_non_block_prefixes():
     """Prefixes that do not start with 'blocks.N.' must return None."""
-    from vllm_omni.quantization.mixed_mxfp_config import _parse_block_idx
+    from vllm_omni.quantization.mxfp4_config import _parse_block_idx
 
     assert _parse_block_idx("condition_embedder.time_embedder.linear_1") is None
     assert _parse_block_idx("proj_out.weight") is None
@@ -233,4 +141,206 @@ def test_supported_methods_include_mxfp4_variants():
 
     assert "mxfp4" in SUPPORTED_QUANTIZATION_METHODS
     assert "mxfp8" in SUPPORTED_QUANTIZATION_METHODS
-    assert "mxfp8_mxfp4_dualscale" in SUPPORTED_QUANTIZATION_METHODS
+    assert "mxfp4_dualscale" in SUPPORTED_QUANTIZATION_METHODS
+
+
+# ---------------------------------------------------------------------------
+# DiffusionMXFP4DualScaleMixedConfig — config roundtrips
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_dualscale_config_get_name():
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    assert DiffusionMXFP4DualScaleMixedConfig.get_name() == "mxfp4_dualscale"
+
+
+def test_mixed_dualscale_config_no_args_defaults():
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig()
+    assert cfg.is_checkpoint_serialized is False
+    assert cfg.ignored_layers == []
+    assert cfg.num_bf16_fallback_layers == 5
+
+
+def test_mixed_dualscale_config_from_config_offline():
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig.from_config(
+        {
+            "quant_method": "mxfp4_dualscale",
+            "is_checkpoint_serialized": True,
+            "ignored_layers": ["blocks.0.attn1.to_q", "proj_out"],
+        }
+    )
+    assert cfg.is_checkpoint_serialized is True
+    assert cfg.ignored_layers == ["blocks.0.attn1.to_q", "proj_out"]
+    assert cfg.num_bf16_fallback_layers == 5  # default
+
+
+def test_mixed_dualscale_config_from_config_online_custom_fallback():
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig.from_config({"num_bf16_fallback_layers": 10})
+    assert cfg.is_checkpoint_serialized is False
+    assert cfg.num_bf16_fallback_layers == 10
+
+
+def test_mixed_dualscale_config_from_config_modules_to_not_convert_fallback():
+    """modules_to_not_convert must be accepted as an alias for ignored_layers."""
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig.from_config(
+        {"is_checkpoint_serialized": True, "modules_to_not_convert": ["proj_out"]}
+    )
+    assert cfg.ignored_layers == ["proj_out"]
+
+
+# ---------------------------------------------------------------------------
+# DiffusionMXFP4DualScaleMixedConfig — get_quant_method dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_dualscale_offline_ignored_layer_returns_unquantized(
+    mocker,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Offline: a prefix in ignored_layers must return UnquantizedLinearMethod."""
+    from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+
+    from vllm_omni.platforms import current_omni_platform
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig(
+        is_checkpoint_serialized=True,
+        ignored_layers=["blocks.0.attn1.to_q"],
+    )
+    layer = mocker.Mock(spec=LinearBase)
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: True)
+
+    method = cfg.get_quant_method(layer, "blocks.0.attn1.to_q")
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_mixed_dualscale_offline_non_ignored_returns_mxfp4(
+    mocker,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Offline: a prefix NOT in ignored_layers must return NPUMxfp4DualScaleLinearMethod."""
+    from vllm.model_executor.layers.linear import LinearBase
+
+    from vllm_omni.platforms import current_omni_platform
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig, NPUMxfp4DualScaleLinearMethod
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig(
+        is_checkpoint_serialized=True,
+        ignored_layers=["blocks.0.attn1.to_q"],
+    )
+    layer = mocker.Mock(spec=LinearBase)
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: True)
+
+    method = cfg.get_quant_method(layer, "blocks.1.attn1.to_q")
+    assert isinstance(method, NPUMxfp4DualScaleLinearMethod)
+
+
+def test_mixed_dualscale_online_fallback_block_returns_unquantized(
+    mocker,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Online: blocks < num_bf16_fallback_layers must return UnquantizedLinearMethod."""
+    from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+
+    from vllm_omni.platforms import current_omni_platform
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig(is_checkpoint_serialized=False, num_bf16_fallback_layers=5)
+    layer = mocker.Mock(spec=LinearBase)
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: True)
+
+    assert isinstance(cfg.get_quant_method(layer, "blocks.0.attn1.to_q"), UnquantizedLinearMethod)
+    assert isinstance(cfg.get_quant_method(layer, "blocks.4.ffn.net.0.proj"), UnquantizedLinearMethod)
+
+
+def test_mixed_dualscale_online_quantized_block_returns_mxfp4(
+    mocker,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Online: blocks >= num_bf16_fallback_layers must return NPUMxfp4DualScaleOnlineLinearMethod."""
+    from vllm.model_executor.layers.linear import LinearBase
+
+    from vllm_omni.platforms import current_omni_platform
+    from vllm_omni.quantization.mxfp4_config import (
+        DiffusionMXFP4DualScaleMixedConfig,
+        NPUMxfp4DualScaleOnlineLinearMethod,
+    )
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig(is_checkpoint_serialized=False, num_bf16_fallback_layers=5)
+    layer = mocker.Mock(spec=LinearBase)
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: True)
+
+    assert isinstance(cfg.get_quant_method(layer, "blocks.5.attn1.to_q"), NPUMxfp4DualScaleOnlineLinearMethod)
+    assert isinstance(cfg.get_quant_method(layer, "blocks.40.ffn.net.0.proj"), NPUMxfp4DualScaleOnlineLinearMethod)
+
+
+def test_mixed_dualscale_online_non_block_prefix_returns_mxfp4(
+    mocker,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Online: layers outside 'blocks.N.*' (condition_embedder etc.) always use MXFP4 online."""
+    from vllm.model_executor.layers.linear import LinearBase
+
+    from vllm_omni.platforms import current_omni_platform
+    from vllm_omni.quantization.mxfp4_config import (
+        DiffusionMXFP4DualScaleMixedConfig,
+        NPUMxfp4DualScaleOnlineLinearMethod,
+    )
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig(is_checkpoint_serialized=False, num_bf16_fallback_layers=5)
+    layer = mocker.Mock(spec=LinearBase)
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: True)
+
+    method = cfg.get_quant_method(layer, "condition_embedder.time_embedder.linear_1")
+    assert isinstance(method, NPUMxfp4DualScaleOnlineLinearMethod)
+
+
+def test_mixed_dualscale_online_ignored_layers_override(
+    mocker,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Online: explicit ignored_layers must return UnquantizedLinearMethod regardless of block index.
+
+    A layer that is NOT in the leading-block range (block 10 >= num_bf16_fallback_layers=5)
+    but IS listed in ignored_layers must still fall back to BF16.  This lets power users
+    pin specific interleaved layers to BF16 during online quantization without needing an
+    offline checkpoint.
+    """
+    from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+
+    from vllm_omni.platforms import current_omni_platform
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig(
+        is_checkpoint_serialized=False,
+        num_bf16_fallback_layers=5,
+        ignored_layers=["blocks.10.attn1.to_q"],
+    )
+    layer = mocker.Mock(spec=LinearBase)
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: True)
+
+    # block 10 is above the leading-block threshold but is in ignored_layers → BF16
+    assert isinstance(cfg.get_quant_method(layer, "blocks.10.attn1.to_q"), UnquantizedLinearMethod)
+
+
+def test_mixed_dualscale_non_linear_returns_none(monkeypatch: pytest.MonkeyPatch):
+    """Non-LinearBase layers (norms, embeddings) must return None → no quantization."""
+    import torch
+
+    from vllm_omni.platforms import current_omni_platform
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
+
+    cfg = DiffusionMXFP4DualScaleMixedConfig()
+    monkeypatch.setattr(current_omni_platform, "is_npu", lambda: True)
+
+    norm_layer = torch.nn.LayerNorm(64)
+    assert cfg.get_quant_method(norm_layer, "blocks.0.norm1") is None

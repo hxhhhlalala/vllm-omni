@@ -55,35 +55,20 @@ def _build_mxfp4(**kw: Any) -> QuantizationConfig:
     return DiffusionMXFP4Config(**kw)
 
 
-def _build_mxfp8_mxfp4_dualscale(**kw: Any) -> QuantizationConfig:
-    """Lazy import for MXFP8 (early blocks) + MXFP4 dual-scale (later blocks) config (NPU only).
+def _build_mxfp4_dualscale(**kw: Any) -> QuantizationConfig:
+    """Lazy import for MXFP4 DualScale + BF16 mixed diffusion config (NPU only).
 
-    This method is checkpoint-topology-dependent: num_mxfp8_blocks is normally
-    injected into transformer/config.json by merge_mxfp4_dualscale_checkpoint.py
-    and auto-detected from there during offline checkpoint loading.
-    If invoked without num_mxfp8_blocks (e.g. via --quantization mxfp8_mxfp4_dualscale
-    on a BF16 checkpoint), num_mxfp8_blocks defaults to 0 and all blocks fall through
-    to the MXFP4 DualScale online path — the MXFP8 branch is never selected.
+    Offline mode (is_checkpoint_serialized=True):
+        ignored_layers from config.json marks interleaved BF16 fallback layers.
+        All other linear layers use W4A4 MXFP4 DualScale.
+
+    Online mode (is_checkpoint_serialized=False):
+        num_bf16_fallback_layers leading transformer blocks use BF16 original weights
+        (default 5 when not specified). Remaining blocks use W4A4 MXFP4 DualScale online.
     """
-    if "num_mxfp8_blocks" not in kw:
-        logger.warning(
-            "'mxfp8_mxfp4_dualscale' was requested without num_mxfp8_blocks. "
-            "Defaulting to num_mxfp8_blocks=0: all transformer blocks will use "
-            "MXFP4 DualScale online quantization and no MXFP8 blocks will be applied. "
-            "This mode is not recommended for online (BF16 checkpoint) use. "
-            "For the intended mixed MXFP8+MXFP4 mode, use a pre-quantized checkpoint "
-            "produced by merge_mxfp4_dualscale_checkpoint.py and omit --quantization "
-            "to let vllm-omni auto-detect num_mxfp8_blocks from transformer/config.json."
-        )
-    else:
-        logger.info(
-            "Building mxfp8_mxfp4_dualscale config: num_mxfp8_blocks=%d, is_checkpoint_serialized=%s",
-            kw["num_mxfp8_blocks"],
-            kw.get("is_checkpoint_serialized", False),
-        )
-    from .mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+    from .mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
-    return DiffusionMXFP8MXFP4DualScaleConfig(**kw)
+    return DiffusionMXFP4DualScaleMixedConfig(**kw)
 
 
 def _build_inc(**kw: Any) -> QuantizationConfig:
@@ -105,7 +90,7 @@ _OVERRIDES: dict[str, Callable[..., QuantizationConfig]] = {
     "int8": _build_int8,
     "mxfp8": _build_mxfp8,
     "mxfp4": _build_mxfp4,
-    "mxfp8_mxfp4_dualscale": _build_mxfp8_mxfp4_dualscale,
+    "mxfp4_dualscale": _build_mxfp4_dualscale,
     "inc": _build_inc,
     "auto-round": _build_inc,
     "auto_round": _build_inc,

@@ -9,7 +9,7 @@ The loader path at pipeline_wan2_2.py carries two quantization contracts:
     - Auto-detects the quant method when no CLI quant_config is provided
     - Rejects method mismatches (CLI vs disk)
     - Upgrades online → offline when disk marks is_checkpoint_*_serialized=True
-    - Rebuilds when the active num_mxfp8_blocks differs from the disk value
+    - Rebuilds when the active ignored_layers differs from the disk value
 
   Wan22Pipeline._create_transformer (~L456)
     - Propagates the auto-detected config to od_config so the second transformer
@@ -92,10 +92,10 @@ def test_create_transformer_detects_mxfp8_serialized_from_config_json(monkeypatc
 
 
 def test_create_transformer_detects_mxfp4_dualscale_from_config_json(monkeypatch):
-    """config.json with mxfp8_mxfp4_dualscale + num_mxfp8_blocks must produce
-    a DiffusionMXFP8MXFP4DualScaleConfig with the correct block count and
+    """config.json with mxfp4_dualscale + ignored_layers must produce
+    a DiffusionMXFP4DualScaleMixedConfig with the correct ignored_layers and
     serialized flag."""
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
     FakeTransformer, captured = _make_fake_transformer()
     monkeypatch.setattr(wan22_module, "WanTransformer3DModel", FakeTransformer)
@@ -103,16 +103,16 @@ def test_create_transformer_detects_mxfp4_dualscale_from_config_json(monkeypatch
     config = {
         **_MIN_CFG,
         "quantization_config": {
-            "quant_method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 7,
+            "quant_method": "mxfp4_dualscale",
+            "ignored_layers": ["blocks.0.attn1.to_q", "blocks.0.attn1.to_k"],
             "is_checkpoint_serialized": True,
         },
     }
     create_transformer_from_config(config)
 
     qc = captured[0].get("quant_config")
-    assert isinstance(qc, DiffusionMXFP8MXFP4DualScaleConfig)
-    assert qc.num_mxfp8_blocks == 7
+    assert isinstance(qc, DiffusionMXFP4DualScaleMixedConfig)
+    assert set(qc.ignored_layers) == {"blocks.0.attn1.to_q", "blocks.0.attn1.to_k"}
     assert qc.is_checkpoint_serialized is True
 
 
@@ -134,7 +134,11 @@ def test_create_transformer_without_quantization_config_passes_no_quant(monkeypa
 
 def test_create_transformer_rejects_method_mismatch(monkeypatch):
     """Passing a CLI quant_config whose get_name() differs from the config.json
-    quant_method must raise ValueError immediately (prevents silent weight corruption)."""
+    quant_method must raise ValueError immediately (prevents silent weight corruption).
+
+    fp8 (vLLM built-in, get_name()=='fp8') vs disk 'mxfp8' triggers the guard.
+    These are distinct methods; using the same method for both would not trigger it.
+    """
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 
     FakeTransformer, _ = _make_fake_transformer()
@@ -182,49 +186,55 @@ def test_create_transformer_upgrades_to_serialized_when_disk_marks_it(monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# create_transformer_from_config — num_mxfp8_blocks rebuild
+# create_transformer_from_config — ignored_layers rebuild
 # ---------------------------------------------------------------------------
 
 
-def test_create_transformer_rebuilds_when_num_mxfp8_blocks_differs(monkeypatch):
-    """When the active quant_config has num_mxfp8_blocks=5 but config.json says 10,
-    the config must be rebuilt from disk so block routing is authoritative for
-    this specific transformer."""
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+def test_create_transformer_rebuilds_when_ignored_layers_differ(monkeypatch):
+    """When the active quant_config has different ignored_layers than config.json,
+    the config must be rebuilt from disk so per-layer BF16 routing is authoritative
+    for this specific transformer."""
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
     FakeTransformer, captured = _make_fake_transformer()
     monkeypatch.setattr(wan22_module, "WanTransformer3DModel", FakeTransformer)
 
-    stale = DiffusionMXFP8MXFP4DualScaleConfig(num_mxfp8_blocks=5, is_checkpoint_serialized=True)
+    stale = DiffusionMXFP4DualScaleMixedConfig(
+        is_checkpoint_serialized=True,
+        ignored_layers=["blocks.0.attn1.to_q"],
+    )
     config = {
         **_MIN_CFG,
         "quantization_config": {
-            "quant_method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 10,
+            "quant_method": "mxfp4_dualscale",
+            "ignored_layers": ["blocks.0.attn1.to_q", "blocks.1.attn1.to_q"],
             "is_checkpoint_serialized": True,
         },
     }
     create_transformer_from_config(config, quant_config=stale)
 
     qc = captured[0].get("quant_config")
-    assert isinstance(qc, DiffusionMXFP8MXFP4DualScaleConfig)
-    assert qc.num_mxfp8_blocks == 10
+    assert isinstance(qc, DiffusionMXFP4DualScaleMixedConfig)
+    assert set(qc.ignored_layers) == {"blocks.0.attn1.to_q", "blocks.1.attn1.to_q"}
 
 
-def test_create_transformer_does_not_rebuild_when_num_mxfp8_blocks_matches(monkeypatch):
-    """When the active quant_config already has the correct num_mxfp8_blocks,
+def test_create_transformer_does_not_rebuild_when_ignored_layers_match(monkeypatch):
+    """When the active quant_config already has the same ignored_layers,
     the same instance must be passed through unchanged (no unnecessary rebuild)."""
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
     FakeTransformer, captured = _make_fake_transformer()
     monkeypatch.setattr(wan22_module, "WanTransformer3DModel", FakeTransformer)
 
-    matching = DiffusionMXFP8MXFP4DualScaleConfig(num_mxfp8_blocks=5, is_checkpoint_serialized=True)
+    matching = DiffusionMXFP4DualScaleMixedConfig(
+        is_checkpoint_serialized=True,
+        ignored_layers=["blocks.0.attn1.to_q"],
+    )
     config = {
         **_MIN_CFG,
         "quantization_config": {
-            "quant_method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 5,
+            "quant_method": "mxfp4_dualscale",
+            "ignored_layers": ["blocks.0.attn1.to_q"],
             "is_checkpoint_serialized": True,
         },
     }
@@ -320,16 +330,17 @@ def test_pipeline_cascade_both_transformers_get_mxfp8_serialized_config(monkeypa
     assert captured[0]["quant_config"] is captured[1]["quant_config"]
 
 
-def test_pipeline_cascade_mxfp4_dualscale_each_transformer_gets_correct_num_blocks(monkeypatch):
-    """Cascade with mxfp8_mxfp4_dualscale where transformer and transformer_2 have
-    different num_mxfp8_blocks in their config.json.
+def test_pipeline_cascade_mxfp4_dualscale_each_transformer_gets_correct_ignored_layers(monkeypatch):
+    """Cascade with mxfp4_dualscale where transformer and transformer_2 have
+    different ignored_layers in their config.json.
 
     Expected outcome:
-      transformer   → num_mxfp8_blocks=5  (auto-detected, propagated to od_config)
-      transformer_2 → num_mxfp8_blocks=10 (rebuilt from disk because 10 ≠ 5)
-      od_config     → num_mxfp8_blocks=5  (unchanged; transformer_2's rebuild is local)
+      transformer   → ignored_layers=["blocks.0.attn1.to_q"]  (auto-detected, propagated to od_config)
+      transformer_2 → ignored_layers=["blocks.0.attn1.to_q", "blocks.1.attn1.to_q"]
+                      (rebuilt from disk because ignored_layers differ)
+      od_config     → ignored_layers=["blocks.0.attn1.to_q"]  (unchanged; rebuild was local)
     """
-    from vllm_omni.quantization.mixed_mxfp_config import DiffusionMXFP8MXFP4DualScaleConfig
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
     FakeTransformer, captured = _make_fake_transformer()
     monkeypatch.setattr(wan22_module, "WanTransformer3DModel", FakeTransformer)
@@ -340,16 +351,16 @@ def test_pipeline_cascade_mxfp4_dualscale_each_transformer_gets_correct_num_bloc
     cfg1 = {
         **_MIN_CFG,
         "quantization_config": {
-            "quant_method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 5,
+            "quant_method": "mxfp4_dualscale",
+            "ignored_layers": ["blocks.0.attn1.to_q"],
             "is_checkpoint_serialized": True,
         },
     }
     cfg2 = {
         **_MIN_CFG,
         "quantization_config": {
-            "quant_method": "mxfp8_mxfp4_dualscale",
-            "num_mxfp8_blocks": 10,
+            "quant_method": "mxfp4_dualscale",
+            "ignored_layers": ["blocks.0.attn1.to_q", "blocks.1.attn1.to_q"],
             "is_checkpoint_serialized": True,
         },
     }
@@ -361,10 +372,13 @@ def test_pipeline_cascade_mxfp4_dualscale_each_transformer_gets_correct_num_bloc
     qc1 = captured[0].get("quant_config")
     qc2 = captured[1].get("quant_config")
 
-    assert isinstance(qc1, DiffusionMXFP8MXFP4DualScaleConfig)
-    assert isinstance(qc2, DiffusionMXFP8MXFP4DualScaleConfig)
-    assert qc1.num_mxfp8_blocks == 5, f"transformer expected 5 blocks, got {qc1.num_mxfp8_blocks}"
-    assert qc2.num_mxfp8_blocks == 10, f"transformer_2 expected 10 blocks, got {qc2.num_mxfp8_blocks}"
+    assert isinstance(qc1, DiffusionMXFP4DualScaleMixedConfig)
+    assert isinstance(qc2, DiffusionMXFP4DualScaleMixedConfig)
+    assert set(qc1.ignored_layers) == {"blocks.0.attn1.to_q"}, f"transformer expected 1 layer, got {qc1.ignored_layers}"
+    assert set(qc2.ignored_layers) == {
+        "blocks.0.attn1.to_q",
+        "blocks.1.attn1.to_q",
+    }, f"transformer_2 expected 2 layers, got {qc2.ignored_layers}"
 
     # od_config retains the first transformer's config; the rebuild was local.
-    assert od_config.quantization_config.num_mxfp8_blocks == 5
+    assert set(od_config.quantization_config.ignored_layers) == {"blocks.0.attn1.to_q"}
