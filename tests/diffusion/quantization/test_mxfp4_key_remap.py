@@ -213,40 +213,46 @@ def test_is_mxfp4_tensor_norm_weight():
 def test_collect_ignored_layers_basic():
     from vllm_omni.quantization.tools.merge_mxfp4_dualscale_checkpoint import _collect_ignored_layers
 
+    # block 0: all three of Q/K/V are BF16 → fused as to_qkv in ignored_layers
+    # block 1: to_qkv is MXFP4 → not in ignored_layers
     merged = {
         "blocks.0.attn1.to_q.weight": torch.zeros(4, 4),
         "blocks.0.attn1.to_k.weight": torch.zeros(4, 4),
+        "blocks.0.attn1.to_v.weight": torch.zeros(4, 4),
         "blocks.1.attn1.to_q.weight": torch.zeros(4, 4),
         "blocks.1.attn1.to_q.weight_scale": torch.zeros(4, 1),
     }
     mxfp4_prefixes = {"blocks.1.attn1.to_q"}
 
     ignored = _collect_ignored_layers(merged, mxfp4_prefixes)
-    assert "blocks.0.attn1.to_q" in ignored
-    assert "blocks.0.attn1.to_k" in ignored
-    assert "blocks.1.attn1.to_q" not in ignored  # MXFP4, not ignored
+    assert "blocks.0.attn1.to_qkv" in ignored  # fused vllm-omni name
+    assert "blocks.0.attn1.to_q" not in ignored  # diffusers name must not appear
+    assert "blocks.0.attn1.to_k" not in ignored
+    assert "blocks.1.attn1.to_qkv" not in ignored  # MXFP4, not ignored
 
 
 def test_collect_ignored_layers_empty_mxfp4():
     """When no layers are MXFP4 (all BF16), all .weight prefixes become ignored_layers."""
     from vllm_omni.quantization.tools.merge_mxfp4_dualscale_checkpoint import _collect_ignored_layers
 
+    # Use non-attn layers to avoid the Q/K/V completeness requirement.
     merged = {
-        "blocks.0.attn1.to_q.weight": torch.zeros(4, 4),
+        "blocks.0.ffn.net.0.proj.weight": torch.zeros(4, 4),
         "proj_out.weight": torch.zeros(4, 4),
     }
     ignored = _collect_ignored_layers(merged, set())
-    assert sorted(ignored) == ["blocks.0.attn1.to_q", "proj_out"]
+    assert sorted(ignored) == ["blocks.0.ffn.net_0.proj", "proj_out"]
 
 
 def test_collect_ignored_layers_returns_sorted():
     """ignored_layers must be sorted for deterministic config.json output."""
     from vllm_omni.quantization.tools.merge_mxfp4_dualscale_checkpoint import _collect_ignored_layers
 
+    # Use FFN layers (no Q/K/V fusion concern) to isolate the sort guarantee.
     merged = {
-        "blocks.2.attn1.to_q.weight": torch.zeros(1),
-        "blocks.0.attn1.to_q.weight": torch.zeros(1),
-        "blocks.1.attn1.to_q.weight": torch.zeros(1),
+        "blocks.2.ffn.net.0.proj.weight": torch.zeros(1),
+        "blocks.0.ffn.net.0.proj.weight": torch.zeros(1),
+        "blocks.1.ffn.net.0.proj.weight": torch.zeros(1),
     }
     ignored = _collect_ignored_layers(merged, set())
     assert ignored == sorted(ignored)
@@ -287,15 +293,19 @@ def test_remap_self_attn_qkv_fusion():
     assert result == ["blocks.0.attn1.to_qkv"]
 
 
-def test_remap_self_attn_qkv_partial_not_fused():
-    """Only some of Q/K/V in ignored — cannot fuse; kept as individual names."""
+def test_remap_self_attn_qkv_partial_raises():
+    """Partial Q/K/V in ignored_layers is invalid — must raise ValueError.
+
+    Self-attention Q/K/V are fused into a single to_qkv layer at runtime;
+    partial precision (some BF16, some MXFP4) cannot be expressed and must
+    be caught early in the merge script.
+    """
+    import pytest
+
     from vllm_omni.quantization.tools.merge_mxfp4_dualscale_checkpoint import _diffusers_to_vllm_ignored
 
-    result = _diffusers_to_vllm_ignored(["blocks.0.attn1.to_q", "blocks.0.attn1.to_k"])
-    # Only q and k present, not v → no fusion
-    assert "blocks.0.attn1.to_qkv" not in result
-    assert "blocks.0.attn1.to_q" in result
-    assert "blocks.0.attn1.to_k" in result
+    with pytest.raises(ValueError, match="Partial BF16 fallback"):
+        _diffusers_to_vllm_ignored(["blocks.0.attn1.to_q", "blocks.0.attn1.to_k"])
 
 
 def test_remap_cross_attn_kept_separate():

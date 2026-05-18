@@ -289,7 +289,15 @@ def _diffusers_to_vllm_ignored(diffusers_ignored: list[str]) -> list[str]:
             if all(f"{prefix}.to_{c}" in ignored_set for c in ("q", "k", "v")):
                 result.add(f"{prefix}.to_qkv")
             else:
-                result.add(name)
+                present = [f"to_{c}" for c in ("q", "k", "v") if f"{prefix}.to_{c}" in ignored_set]
+                missing = [f"to_{c}" for c in ("q", "k", "v") if f"{prefix}.to_{c}" not in ignored_set]
+                raise ValueError(
+                    f"Partial BF16 fallback for '{prefix}': "
+                    f"{', '.join(present)} in ignored_layers but {', '.join(missing)} is not. "
+                    f"Self-attention Q/K/V are fused into a single to_qkv layer at runtime; "
+                    f"all three must share the same precision. "
+                    f"Either quantize all of to_q/to_k/to_v or keep all three in BF16."
+                )
             continue
 
         name = re.sub(r"\.ffn\.net\.0\.proj$", ".ffn.net_0.proj", name)
