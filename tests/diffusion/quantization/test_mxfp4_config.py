@@ -3,8 +3,17 @@
 """Tests for MXFP4 quantization configs and the MXFP4 DualScale + BF16 mixed config."""
 
 import pytest
+import torch
 
 pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
+
+
+@pytest.fixture(autouse=True)
+def _patch_tp_state(monkeypatch):
+    """Patch TP rank/world_size so ModelWeightParameter can be instantiated on CPU
+    without an initialized distributed group.  Returns TP=1 rank=0 for all tests."""
+    monkeypatch.setattr("vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1)
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +343,6 @@ def test_mixed_dualscale_online_ignored_layers_override(
 
 def test_mixed_dualscale_non_linear_returns_none(monkeypatch: pytest.MonkeyPatch):
     """Non-LinearBase layers (norms, embeddings) must return None → no quantization."""
-    import torch
-
     from vllm_omni.platforms import current_omni_platform
     from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
@@ -344,3 +351,189 @@ def test_mixed_dualscale_non_linear_returns_none(monkeypatch: pytest.MonkeyPatch
 
     norm_layer = torch.nn.LayerNorm(64)
     assert cfg.get_quant_method(norm_layer, "blocks.0.norm1") is None
+
+
+# ---------------------------------------------------------------------------
+# TP=2 create_weights: parameter shapes and input_dim/output_dim
+#
+# Two scenarios mirror real Wan2.2 A14B linear layer types:
+#   Column-parallel (to_q, ffn.net_0): output is sharded (N/TP), input is full (K).
+#   Row-parallel   (to_out, ffn.net_2): input is sharded (K/TP), output is full (N).
+#
+# Tests verify:
+#   1. Registered parameter shapes are correct for each partition configuration.
+#   2. input_dim/output_dim attributes are set so RowParallelLinear.weight_loader
+#      can shard scale tensors correctly (the fix for the TP>1 shape-mismatch bug).
+#   3. Simulated loader slicing: slicing the full checkpoint tensor along the
+#      declared input_dim produces the exact shape stored in the parameter —
+#      proving the dim declaration is consistent with the allocation.
+# ---------------------------------------------------------------------------
+
+# K must be divisible by 32 (fine groups) and 512 (coarse groups).
+_TP2_K, _TP2_N, _TP2 = 1024, 512, 2
+
+
+class _FakeLayer(torch.nn.Module):
+    """Bare nn.Module that accepts register_parameter without a real weight_loader."""
+
+
+def _create_weights(method, *, input_size_per_partition, output_partition_sizes):
+    layer = _FakeLayer()
+    method.create_weights(
+        layer=layer,
+        input_size_per_partition=input_size_per_partition,
+        output_partition_sizes=output_partition_sizes,
+        input_size=_TP2_K,
+        output_size=_TP2_N,
+        params_dtype=torch.bfloat16,
+    )
+    return layer
+
+
+def _shard(tensor, param, rank, tp, dim_attr):
+    """Slice `tensor` along the dimension given by `param.<dim_attr>` for `rank`."""
+    dim = getattr(param, dim_attr)
+    if dim is None:
+        return tensor  # not sharded along this axis
+    shard_size = param.shape[dim]
+    slices = [slice(None)] * tensor.ndim
+    slices[dim] = slice(rank * shard_size, (rank + 1) * shard_size)
+    return tensor[tuple(slices)]
+
+
+# ── DualScale method ─────────────────────────────────────────────────────────
+
+
+def test_dualscale_column_parallel_tp2_shapes():
+    """Column-parallel TP=2: output halved, fine/coarse groups stay full, mul_scale full."""
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig, NPUMxfp4DualScaleLinearMethod
+
+    method = NPUMxfp4DualScaleLinearMethod(DiffusionMXFP4DualScaleMixedConfig())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K, output_partition_sizes=[_TP2_N // _TP2])
+
+    assert layer.weight.shape == (_TP2_N // _TP2, _TP2_K)
+    assert layer.weight_scale.shape == (_TP2_N // _TP2, _TP2_K // 32)
+    assert layer.weight_dual_scale.shape == (_TP2_N // _TP2, _TP2_K // 512, 1)
+    assert layer.mul_scale.shape == (_TP2_K,)
+
+
+def test_dualscale_row_parallel_tp2_shapes():
+    """Row-parallel TP=2: input halved, fine/coarse groups halved, mul_scale halved."""
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig, NPUMxfp4DualScaleLinearMethod
+
+    method = NPUMxfp4DualScaleLinearMethod(DiffusionMXFP4DualScaleMixedConfig())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K // _TP2, output_partition_sizes=[_TP2_N])
+
+    assert layer.weight.shape == (_TP2_N, _TP2_K // _TP2)
+    assert layer.weight_scale.shape == (_TP2_N, (_TP2_K // _TP2) // 32)
+    assert layer.weight_dual_scale.shape == (_TP2_N, (_TP2_K // _TP2) // 512, 1)
+    assert layer.mul_scale.shape == (_TP2_K // _TP2,)
+
+
+def test_dualscale_scale_parameter_input_dims():
+    """weight_scale/weight_dual_scale must have input_dim=1; mul_scale must have input_dim=0.
+
+    RowParallelLinear.weight_loader only shards a parameter when input_dim is set.
+    Without these, loading a full checkpoint tensor into a per-rank shape causes a
+    shape mismatch for TP>1 row-parallel layers (to_out, ffn.net_2).
+    """
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig, NPUMxfp4DualScaleLinearMethod
+
+    method = NPUMxfp4DualScaleLinearMethod(DiffusionMXFP4DualScaleMixedConfig())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K, output_partition_sizes=[_TP2_N])
+
+    assert layer.weight_scale.input_dim == 1
+    assert layer.weight_scale.output_dim == 0
+    assert layer.weight_dual_scale.input_dim == 1
+    assert layer.weight_dual_scale.output_dim == 0
+    assert layer.mul_scale.input_dim == 0
+    assert layer.mul_scale.output_dim is None
+
+
+def test_dualscale_row_parallel_tp2_loader_simulation():
+    """Slicing full checkpoint tensors along input_dim must match row-parallel parameter shapes.
+
+    Simulates what RowParallelLinear.weight_loader does: for each scale parameter,
+    take the slice at rank*shard_size:(rank+1)*shard_size along input_dim.
+    The resulting shape must equal the per-rank parameter shape allocated by create_weights.
+    """
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig, NPUMxfp4DualScaleLinearMethod
+
+    method = NPUMxfp4DualScaleLinearMethod(DiffusionMXFP4DualScaleMixedConfig())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K // _TP2, output_partition_sizes=[_TP2_N])
+
+    # Full checkpoint tensors (what the loader reads from disk).
+    ckpt_weight_scale = torch.zeros(_TP2_N, _TP2_K // 32)
+    ckpt_weight_dual_scale = torch.zeros(_TP2_N, _TP2_K // 512, 1)
+    ckpt_mul_scale = torch.zeros(_TP2_K)
+
+    for rank in range(_TP2):
+        assert _shard(ckpt_weight_scale, layer.weight_scale, rank, _TP2, "input_dim").shape == layer.weight_scale.shape
+        assert (
+            _shard(ckpt_weight_dual_scale, layer.weight_dual_scale, rank, _TP2, "input_dim").shape
+            == layer.weight_dual_scale.shape
+        )
+        assert _shard(ckpt_mul_scale, layer.mul_scale, rank, _TP2, "input_dim").shape == layer.mul_scale.shape
+
+
+def test_dualscale_column_parallel_tp2_loader_simulation():
+    """Slicing full checkpoint tensors along output_dim must match column-parallel parameter shapes.
+
+    For column-parallel layers, the loader shards along output_dim (rows).
+    mul_scale has output_dim=None → not sharded (full tensor, same for all ranks).
+    """
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig, NPUMxfp4DualScaleLinearMethod
+
+    method = NPUMxfp4DualScaleLinearMethod(DiffusionMXFP4DualScaleMixedConfig())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K, output_partition_sizes=[_TP2_N // _TP2])
+
+    ckpt_weight_scale = torch.zeros(_TP2_N, _TP2_K // 32)
+    ckpt_weight_dual_scale = torch.zeros(_TP2_N, _TP2_K // 512, 1)
+    ckpt_mul_scale = torch.zeros(_TP2_K)
+
+    for rank in range(_TP2):
+        assert _shard(ckpt_weight_scale, layer.weight_scale, rank, _TP2, "output_dim").shape == layer.weight_scale.shape
+        assert (
+            _shard(ckpt_weight_dual_scale, layer.weight_dual_scale, rank, _TP2, "output_dim").shape
+            == layer.weight_dual_scale.shape
+        )
+        # mul_scale: output_dim=None → no sharding → full tensor fits the column-parallel parameter
+        assert _shard(ckpt_mul_scale, layer.mul_scale, rank, _TP2, "output_dim").shape == layer.mul_scale.shape
+
+
+# ── Single-scale method ───────────────────────────────────────────────────────
+
+
+def test_single_scale_row_parallel_tp2_shapes():
+    """Row-parallel TP=2: input halved → weight_scale groups halved."""
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4Config, NPUMxfp4LinearMethod
+
+    method = NPUMxfp4LinearMethod(DiffusionMXFP4Config())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K // _TP2, output_partition_sizes=[_TP2_N])
+
+    assert layer.weight.shape == (_TP2_N, _TP2_K // _TP2)
+    assert layer.weight_scale.shape == (_TP2_N, (_TP2_K // _TP2) // 32)
+
+
+def test_single_scale_scale_parameter_input_dims():
+    """Single-scale weight_scale must have input_dim=1 for RowParallel TP sharding."""
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4Config, NPUMxfp4LinearMethod
+
+    method = NPUMxfp4LinearMethod(DiffusionMXFP4Config())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K, output_partition_sizes=[_TP2_N])
+
+    assert layer.weight_scale.input_dim == 1
+    assert layer.weight_scale.output_dim == 0
+
+
+def test_single_scale_row_parallel_tp2_loader_simulation():
+    """Slicing full checkpoint weight_scale along input_dim matches row-parallel parameter shape."""
+    from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4Config, NPUMxfp4LinearMethod
+
+    method = NPUMxfp4LinearMethod(DiffusionMXFP4Config())
+    layer = _create_weights(method, input_size_per_partition=_TP2_K // _TP2, output_partition_sizes=[_TP2_N])
+
+    ckpt_weight_scale = torch.zeros(_TP2_N, _TP2_K // 32)
+
+    for rank in range(_TP2):
+        assert _shard(ckpt_weight_scale, layer.weight_scale, rank, _TP2, "input_dim").shape == layer.weight_scale.shape
