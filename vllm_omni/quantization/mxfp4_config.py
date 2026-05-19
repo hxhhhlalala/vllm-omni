@@ -388,12 +388,15 @@ class NPUMxfp4DualScaleLinearMethod(MXFPLinearMethodBase):
         )
 
         # Fine scale: one uint8 exponent (float8_e8m0fnu bit pattern) per group of 32 K elements.
+        # input_dim=1: RowParallelLinear weight_loader shards along the K-group dimension (dim 1)
+        # so each rank receives only its (K/TP)//32 groups; ColumnParallelLinear only uses
+        # output_dim=0 for sharding and leaves dim 1 intact.
         num_groups_fine = (input_size_per_partition + 31) // 32
         layer.register_parameter(
             "weight_scale",
             ModelWeightParameter(
                 data=torch.empty(output_size_per_partition, num_groups_fine, dtype=torch.uint8),
-                input_dim=None,
+                input_dim=1,
                 output_dim=0,
                 weight_loader=weight_loader,
             ),
@@ -402,12 +405,13 @@ class NPUMxfp4DualScaleLinearMethod(MXFPLinearMethodBase):
         # Coarse scale: one float32 per group of 512 K elements.
         # Shape (N, K_coarse, 1) matches checkpoint layout exactly, avoiding the
         # shape-mismatch assert in linear.py:1344.
+        # input_dim=1: same TP sharding rationale as weight_scale above.
         num_groups_coarse = (input_size_per_partition + 511) // 512
         layer.register_parameter(
             "weight_dual_scale",
             ModelWeightParameter(
                 data=torch.empty(output_size_per_partition, num_groups_coarse, 1, dtype=torch.float32),
-                input_dim=None,
+                input_dim=1,
                 output_dim=0,
                 weight_loader=weight_loader,
             ),
@@ -415,11 +419,13 @@ class NPUMxfp4DualScaleLinearMethod(MXFPLinearMethodBase):
 
         # mul_scale is a float32 calibration tensor; register as float32
         # to avoid precision loss from an implicit BF16 cast during weight loading.
+        # input_dim=0: RowParallelLinear shards the 1-D per-input-channel tensor along dim 0
+        # so each rank receives only its K/TP channels; ColumnParallelLinear leaves it intact.
         layer.register_parameter(
             "mul_scale",
             ModelWeightParameter(
                 data=torch.empty(input_size_per_partition, dtype=torch.float32),
-                input_dim=None,
+                input_dim=0,
                 output_dim=None,
                 weight_loader=weight_loader,
             ),
