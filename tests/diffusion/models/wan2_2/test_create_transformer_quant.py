@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Regression tests for transformer quant-config auto-detection and cascade propagation.
+"""Regression tests for transformer quant-config auto-detection.
 
 The loader path at pipeline_wan2_2.py carries two quantization contracts:
 
@@ -12,9 +12,10 @@ The loader path at pipeline_wan2_2.py carries two quantization contracts:
     - Rebuilds when the active ignored_layers differs from the disk value
 
   Wan22Pipeline._create_transformer (~L456)
-    - Propagates the auto-detected config to od_config so the second transformer
-      in a cascade model reuses the same config rather than re-reading independently
-    - Does NOT overwrite od_config.quantization_config when it is already set
+    - Passes od_config.quantization_config (set by CLI or externally) to
+      create_transformer_from_config for each transformer independently.
+    - When od_config.quantization_config is None, each transformer auto-detects
+      from its own config.json; od_config is NOT modified by this call.
 
 All tests are pure-CPU and do not load model weights.
 """
@@ -244,17 +245,17 @@ def test_create_transformer_does_not_rebuild_when_ignored_layers_match(monkeypat
 
 
 # ---------------------------------------------------------------------------
-# Wan22Pipeline._create_transformer — od_config propagation
+# Wan22Pipeline._create_transformer — od_config passthrough
 # ---------------------------------------------------------------------------
 
 
-def test_pipeline_create_transformer_propagates_quant_config_to_od_config(monkeypatch):
+def test_pipeline_create_transformer_auto_detects_from_config_json(monkeypatch):
     """When od_config.quantization_config is None, _create_transformer must
-    auto-detect the quant method from config.json and propagate the built config
-    back to od_config so the next call can reuse it."""
+    auto-detect the quant method from config.json and pass it to the transformer.
+    od_config itself must remain unchanged (None)."""
     from vllm_omni.quantization.mxfp8_config import DiffusionMXFP8Config
 
-    FakeTransformer, _ = _make_fake_transformer()
+    FakeTransformer, captured = _make_fake_transformer()
     monkeypatch.setattr(wan22_module, "WanTransformer3DModel", FakeTransformer)
 
     od_config = SimpleNamespace(quantization_config=None)
@@ -269,14 +270,16 @@ def test_pipeline_create_transformer_propagates_quant_config_to_od_config(monkey
     }
     pipeline._create_transformer(config)
 
-    assert isinstance(od_config.quantization_config, DiffusionMXFP8Config)
-    assert od_config.quantization_config.is_checkpoint_mxfp8_serialized is True
+    qc = captured[0].get("quant_config")
+    assert isinstance(qc, DiffusionMXFP8Config)
+    assert qc.is_checkpoint_mxfp8_serialized is True
+    # od_config must NOT be modified — each transformer auto-detects independently.
+    assert od_config.quantization_config is None
 
 
 def test_pipeline_create_transformer_does_not_overwrite_existing_od_config(monkeypatch):
-    """If od_config.quantization_config is already set (propagated from the first
-    transformer), _create_transformer must leave it unchanged — the propagated
-    config is the authority for the cascade."""
+    """If od_config.quantization_config is already set (e.g. via CLI), _create_transformer
+    must pass it through to the transformer unchanged and leave od_config unmodified."""
     from vllm_omni.quantization.mxfp8_config import DiffusionMXFP8Config
 
     FakeTransformer, _ = _make_fake_transformer()
@@ -305,8 +308,7 @@ def test_pipeline_create_transformer_does_not_overwrite_existing_od_config(monke
 
 def test_pipeline_cascade_both_transformers_get_mxfp8_serialized_config(monkeypatch):
     """Cascade model (transformer + transformer_2) with MXFP8 checkpoint:
-    - First transformer:  auto-detects serialized config, propagates to od_config.
-    - Second transformer: reuses the propagated config (same instance).
+    - Each transformer auto-detects from its own config.json independently.
     Both must receive is_checkpoint_mxfp8_serialized=True."""
     from vllm_omni.quantization.mxfp8_config import DiffusionMXFP8Config
 
@@ -326,19 +328,16 @@ def test_pipeline_cascade_both_transformers_get_mxfp8_serialized_config(monkeypa
         assert isinstance(qc, DiffusionMXFP8Config), f"transformer[{i}]: expected DiffusionMXFP8Config, got {type(qc)}"
         assert qc.is_checkpoint_mxfp8_serialized is True, f"transformer[{i}]: expected serialized=True"
 
-    # Second transformer must reuse the propagated instance — no unnecessary rebuild.
-    assert captured[0]["quant_config"] is captured[1]["quant_config"]
-
 
 def test_pipeline_cascade_mxfp4_dualscale_each_transformer_gets_correct_ignored_layers(monkeypatch):
     """Cascade with mxfp4_dualscale where transformer and transformer_2 have
     different ignored_layers in their config.json.
 
     Expected outcome:
-      transformer   → ignored_layers=["blocks.0.attn1.to_q"]  (auto-detected, propagated to od_config)
+      transformer   → ignored_layers=["blocks.0.attn1.to_q"]  (auto-detected from its config.json)
       transformer_2 → ignored_layers=["blocks.0.attn1.to_q", "blocks.1.attn1.to_q"]
-                      (rebuilt from disk because ignored_layers differ)
-      od_config     → ignored_layers=["blocks.0.attn1.to_q"]  (unchanged; rebuild was local)
+                      (auto-detected from its own config.json independently)
+      od_config     → quantization_config remains None (not modified by _create_transformer)
     """
     from vllm_omni.quantization.mxfp4_config import DiffusionMXFP4DualScaleMixedConfig
 
@@ -380,5 +379,5 @@ def test_pipeline_cascade_mxfp4_dualscale_each_transformer_gets_correct_ignored_
         "blocks.1.attn1.to_q",
     }, f"transformer_2 expected 2 layers, got {qc2.ignored_layers}"
 
-    # od_config retains the first transformer's config; the rebuild was local.
-    assert set(od_config.quantization_config.ignored_layers) == {"blocks.0.attn1.to_q"}
+    # od_config must remain unchanged — _create_transformer does not modify it.
+    assert od_config.quantization_config is None

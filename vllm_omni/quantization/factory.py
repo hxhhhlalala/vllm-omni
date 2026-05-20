@@ -280,3 +280,80 @@ def build_quant_config(
         return _build_from_method_and_config(method, merged)
 
     raise TypeError(f"quantization config must be str, dict, QuantizationConfig, or None, got {type(spec).__name__}")
+
+
+def _disk_marks_serialized(qc_kwargs: dict[str, Any], quant_config: object) -> bool:
+    """Return True when config.json says serialized but the active quant_config does not.
+
+    Matches any flag following the is_checkpoint_*_serialized naming convention,
+    so new quant methods don't require updating an explicit allowlist.
+    """
+    for key, val in qc_kwargs.items():
+        if key.startswith("is_checkpoint_") and key.endswith("_serialized"):
+            if val and hasattr(quant_config, key) and not getattr(quant_config, key):
+                return True
+    return False
+
+
+def resolve_quant_config_from_disk(
+    quant_config: QuantizationConfig | None,
+    disk_qc: dict[str, Any] | str | None,
+) -> QuantizationConfig | None:
+    """Reconcile an active quant_config against quantization_config from a transformer's config.json.
+
+    Used when loading individual transformer blocks that each have their own config.json
+    (e.g. cascade models with separate transformer and transformer_2 directories).
+
+    Rules:
+      - disk_qc is None: return quant_config unchanged.
+      - quant_config is None: auto-detect from disk_qc (full build).
+      - Methods mismatch: raise ValueError — prevents silent weight corruption.
+      - Disk marks serialized but quant_config is online: rebuild from disk.
+      - ignored_layers differ: rebuild from disk (per-transformer BF16 routing).
+    """
+    if disk_qc is None:
+        return quant_config
+
+    if isinstance(disk_qc, str):
+        if quant_config is None:
+            logger.info("Auto-detected quantization from config.json: method=%s", disk_qc)
+            return build_quant_config(disk_qc)
+        return quant_config
+
+    if not isinstance(disk_qc, Mapping) or "quant_method" not in disk_qc:
+        return quant_config
+
+    qc_method: str = disk_qc["quant_method"]
+    qc_kwargs: dict[str, Any] = {k: v for k, v in disk_qc.items() if k != "quant_method"}
+
+    if quant_config is None:
+        logger.info(
+            "Auto-detected quantization from config.json: method=%s kwargs=%s",
+            qc_method,
+            qc_kwargs,
+        )
+        return build_quant_config(qc_method, **qc_kwargs)
+
+    if quant_config.get_name() != qc_method:
+        raise ValueError(
+            f"Checkpoint config.json declares quant_method={qc_method!r} but the "
+            f"active quantization config is {quant_config.get_name()!r}. "
+            "Pass a matching --quantization flag or omit it for auto-detection."
+        )
+
+    if _disk_marks_serialized(qc_kwargs, quant_config):
+        logger.info(
+            "config.json marks checkpoint as serialized; switching to offline %s mode.",
+            qc_method,
+        )
+        return build_quant_config(qc_method, **qc_kwargs)
+
+    if (
+        "ignored_layers" in qc_kwargs
+        and hasattr(quant_config, "ignored_layers")
+        and set(qc_kwargs.get("ignored_layers") or []) != set(quant_config.ignored_layers or [])
+    ):
+        logger.info("config.json ignored_layers differs from active config; rebuilding quant_config.")
+        return build_quant_config(qc_method, **qc_kwargs)
+
+    return quant_config

@@ -121,21 +121,6 @@ def load_transformer_config(model_path: str, subfolder: str = "transformer", loc
     return {}
 
 
-_SERIALIZED_FLAGS = (
-    "is_checkpoint_mxfp8_serialized",
-    "is_checkpoint_mxfp4_serialized",
-    "is_checkpoint_serialized",
-)
-
-
-def _disk_marks_serialized(qc_kwargs: dict, quant_config: object) -> bool:
-    """Return True when config.json says serialized but the active quant_config does not."""
-    for flag in _SERIALIZED_FLAGS:
-        if qc_kwargs.get(flag, False) and hasattr(quant_config, flag) and not getattr(quant_config, flag):
-            return True
-    return False
-
-
 def create_transformer_from_config(
     config: dict,
     quant_config: QuantizationConfig | None = None,
@@ -174,63 +159,10 @@ def create_transformer_from_config(
     if "pos_embed_seq_len" in config:
         kwargs["pos_embed_seq_len"] = config["pos_embed_seq_len"]
 
-    # Auto-detect quantization from transformer's config.json when not explicitly provided.
-    # merge_mxfp8_checkpoint.py injects quantization_config into config.json so that
-    # offline quantized checkpoints are recognized here without a CLI flag.
     if "quantization_config" in config:
-        from vllm_omni.quantization.factory import build_quant_config
+        from vllm_omni.quantization.factory import resolve_quant_config_from_disk
 
-        disk_qc = config["quantization_config"]
-        if isinstance(disk_qc, dict) and "quant_method" in disk_qc:
-            qc_method = disk_qc["quant_method"]
-            qc_kwargs = {k: v for k, v in disk_qc.items() if k != "quant_method"}
-            if quant_config is None:
-                # No CLI flag: full auto-detection.
-                quant_config = build_quant_config(qc_method, **qc_kwargs)
-                logger.info(
-                    "Auto-detected quantization from transformer config.json: method=%s kwargs=%s",
-                    qc_method,
-                    qc_kwargs,
-                )
-            elif quant_config.get_name() != qc_method:
-                # The caller supplied a quant_config of a different method than
-                # what the checkpoint was built with. Loading serialized tensors
-                # (e.g. MXFP8 weight scales) with the wrong linear method would
-                # produce corrupt output or a shape mismatch crash.  Reject early
-                # so the user gets a clear message instead of a silent failure.
-                raise ValueError(
-                    f"Checkpoint config.json declares quant_method={qc_method!r} but the "
-                    f"active quantization config is {quant_config.get_name()!r}. "
-                    "Pass a matching --quantization flag or omit it for auto-detection."
-                )
-            elif _disk_marks_serialized(qc_kwargs, quant_config):
-                # Same method: CLI provided online mode but config.json marks this
-                # as a pre-quantized offline checkpoint.  Switch to offline mode so
-                # users can pass --quantization mxfp8 without knowing the
-                # online/offline distinction.
-                quant_config = build_quant_config(qc_method, **qc_kwargs)
-                logger.info(
-                    "config.json marks checkpoint as serialized; switching to offline %s mode.",
-                    qc_method,
-                )
-            elif (
-                "ignored_layers" in qc_kwargs
-                and hasattr(quant_config, "ignored_layers")
-                and set(qc_kwargs.get("ignored_layers") or []) != set(quant_config.ignored_layers or [])
-            ):
-                # mxfp4_dualscale cascade: each transformer may have different BF16 fallback
-                # layers in its config.json.  Rebuild so per-transformer routing is correct.
-                quant_config = build_quant_config(qc_method, **qc_kwargs)
-                logger.info(
-                    "Disk config.json ignored_layers differs from active config; "
-                    "rebuilding quant_config from transformer config.json.",
-                )
-        elif isinstance(disk_qc, str) and quant_config is None:
-            quant_config = build_quant_config(disk_qc)
-            logger.info(
-                "Auto-detected quantization from transformer config.json: method=%s",
-                disk_qc,
-            )
+        quant_config = resolve_quant_config_from_disk(quant_config, config["quantization_config"])
 
     if quant_config is not None:
         kwargs["quant_config"] = quant_config
@@ -457,38 +389,6 @@ class Wan22Pipeline(
     def _create_transformer(self, config: dict) -> WanTransformer3DModel:
         """Create a transformer from a config dict. Respects od_config.quantization_config."""
         quant_config = getattr(self.od_config, "quantization_config", None)
-
-        # When od_config.quantization_config is None (no CLI --quantization flag), pre-build
-        # the quant_config from the transformer's own config.json and propagate it back to
-        # od_config.  This has two effects:
-        #   1. The first transformer's auto-detected config is reused by the second transformer
-        #      in cascade models (e.g. Wan2.2-T2V-A14B); if the second transformer's config.json
-        #      has different ignored_layers, create_transformer_from_config rebuilds locally.
-        #   2. od_config.quantization_config becomes non-None so _check_unloaded_weights can
-        #      filter expected quantization suffixes instead of raising on every unloaded param.
-        if quant_config is None and "quantization_config" in config:
-            from vllm_omni.quantization.factory import build_quant_config
-
-            disk_qc = config["quantization_config"]
-            if isinstance(disk_qc, dict) and "quant_method" in disk_qc:
-                qc_method = disk_qc["quant_method"]
-                qc_kwargs = {k: v for k, v in disk_qc.items() if k != "quant_method"}
-                quant_config = build_quant_config(qc_method, **qc_kwargs)
-                self.od_config.quantization_config = quant_config
-                logger.info(
-                    "Auto-detected quantization from transformer config.json and propagated to od_config: "
-                    "method=%s kwargs=%s",
-                    qc_method,
-                    qc_kwargs,
-                )
-            elif isinstance(disk_qc, str):
-                quant_config = build_quant_config(disk_qc)
-                self.od_config.quantization_config = quant_config
-                logger.info(
-                    "Auto-detected quantization from transformer config.json and propagated to od_config: method=%s",
-                    disk_qc,
-                )
-
         return create_transformer_from_config(config, quant_config=quant_config)
 
     @property

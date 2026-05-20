@@ -340,3 +340,140 @@ unless they appear in `ignored_layers`.
    DualScale offline method mitigates this with calibrated `mul_scale` smooth
    quantization. Use `ignored_layers` and `num_bf16_fallback_layers` to trade
    off compression vs. accuracy for precision-sensitive layers.
+
+## Adapting MXFP4 for a New Model
+
+This section is aimed at developers who want to add MXFP4 support to a model
+other than Wan2.2. The three integration points are: (1) discovering the correct
+runtime layer names, (2) wiring `ignored_layers` into the model, and (3) writing
+a merge script for offline checkpoints.
+
+### Step 1 — Discover runtime layer names
+
+`ignored_layers` entries must match the **runtime parameter names** used inside
+vllm-omni, which may differ from the names stored in the diffusers checkpoint.
+The canonical source of truth is the model's own `named_parameters()`.
+
+```python
+from vllm_omni import Omni
+
+# Load the model without quantization to inspect parameter names.
+omni = Omni(model="/path/to/your-model")  # no --quantization flag
+for name, _ in omni.pipeline.transformer.named_parameters():
+    if "weight" in name and "scale" not in name:
+        print(name)
+```
+
+Compare the printed names against the diffusers checkpoint keys
+(`safetensors.safe_open` or `torch.load`) to identify any renames your model
+applies. Common patterns that differ in Wan2.2 (and may appear in other
+models):
+
+| Diffusers checkpoint name | vllm-omni runtime name | Reason |
+|---------------------------|------------------------|--------|
+| `attn1.to_q`, `attn1.to_k`, `attn1.to_v` | `attn1.to_qkv` | Self-attention Q/K/V fused into `QKVParallelLinear` |
+| `ffn.net.0.proj` | `ffn.net_0.proj` | Dots in sub-module names replaced with underscores |
+| `ffn.net.2` | `ffn.net_2` | Same underscore rule |
+| `to_out.0` | `to_out` | Sequential index stripped |
+
+If your model has different fusion patterns, inspect `packed_modules_mapping`
+on the model class — this dict records how checkpoint keys are mapped to
+fused runtime parameters.
+
+!!! warning "Partial QKV fallback is not allowed"
+    If your model fuses Q, K, V into a single layer, `ignored_layers` must
+    include **all three or none**. A partial fallback (e.g. `to_q` in BF16 but
+    `to_k`, `to_v` quantized) cannot be expressed at runtime because they share
+    one `QKVParallelLinear`. The merge script enforces this and raises an error
+    if only some of the trio appear as non-quantized.
+
+### Step 2 — Add ignored_layers to the model
+
+#### Online mode
+
+Pass `ignored_layers` directly in the quantization config using the **runtime
+names** discovered in Step 1. No code changes to the model are required.
+
+```python
+omni = Omni(
+    model="/path/to/your-model",
+    quantization={
+        "method": "mxfp4_dualscale",
+        "ignored_layers": [
+            "blocks.0.attn1.to_qkv",   # runtime name, not diffusers name
+            "blocks.0.attn1.to_out",
+            "blocks.0.ffn.net_0.proj",
+        ],
+    },
+)
+```
+
+```bash
+# CLI does not support list-typed ignored_layers directly.
+# Use the Python API or set ignored_layers in config.json (offline).
+python your_script.py --model /path/to/your-model --quantization mxfp4_dualscale
+```
+
+The `num_bf16_fallback_layers` coarse rule is an alternative to listing layers
+individually: set it to N to keep all linear layers in blocks 0 … N-1 in BF16.
+The right value depends on the model's sensitivity; evaluate on a validation
+set and pick the smallest N that meets your accuracy target.
+
+#### Offline mode
+
+For offline checkpoints, `ignored_layers` is written into each transformer's
+`config.json` by the merge script (see Step 3). No manual editing is needed if
+the merge script is correct. The injected block:
+
+```json
+{
+  "quant_method": "mxfp4_dualscale",
+  "is_checkpoint_serialized": true,
+  "ignored_layers": [
+    "blocks.0.attn1.to_qkv",
+    "blocks.0.attn1.to_out"
+  ]
+}
+```
+
+To add a layer manually (e.g. to pin an additional layer to BF16 without
+re-running the merge script), edit `config.json` inside the transformer
+subfolder. Use runtime names, not diffusers checkpoint names.
+
+### Step 3 — Write a merge script for offline mode
+
+The merge script for a new model mirrors
+`vllm_omni/quantization/tools/merge_mxfp4_dualscale_checkpoint.py`. The four
+things it must do:
+
+1. **Remap tensor names** from the quantization tool convention to diffusers
+   convention (strip wrappers like `.linear.`, `.div.`; fix any prefix
+   differences).
+
+2. **Collect ignored_layers**: after loading, enumerate all `*.weight` keys that
+   have no corresponding `*.weight_scale` (i.e. layers the tool left in BF16).
+   Convert diffusers names to vllm-omni runtime names (fuse QKV, rename FFN
+   sub-modules, etc.). Write the result to `config.json`.
+
+3. **Inject `quantization_config`** into `config.json`:
+   ```python
+   config["quantization_config"] = {
+       "quant_method":              "mxfp4_dualscale",
+       "is_checkpoint_serialized":  True,
+       "ignored_layers":            ignored_layers,   # runtime names
+   }
+   ```
+
+4. **Save** the merged safetensors and the updated `config.json`.
+
+The key helper to implement is the diffusers-to-runtime name translator
+(equivalent to `_diffusers_to_vllm_ignored` in the Wan2.2 merge script).
+For each non-quantized diffusers weight key, apply your model's specific
+renaming rules and collect the results.
+
+!!! tip "Validate before serving"
+    After producing the offline checkpoint, load it without a `--quantization`
+    flag and verify that vLLM-Omni auto-detects the correct method. Check that
+    the layer count reported in the startup log matches expectations: quantized
+    layer count + `ignored_layers` count should equal total linear layer count.
+    Any mismatch indicates a name-mapping bug in the merge script.
