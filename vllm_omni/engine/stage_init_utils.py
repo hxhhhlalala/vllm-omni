@@ -791,11 +791,47 @@ def build_vllm_config(
             filtered_engine_args_dict["max_model_len"],
         )
 
+    # --- NPU AR online MXFP8: neutralize the native "mxfp8" shorthand so vLLM's
+    # create_engine_config does not reject it on NPU ("mxfp8 quantization is
+    # currently not supported in npu"). The omni DiffusionMXFP8Config is injected
+    # after create_engine_config below. Only for BF16 (online) checkpoints;
+    # ascend pre-quantized checkpoints keep their existing load path.
+    from vllm_omni.quantization.factory import (
+        _is_mxfp8_prequantized_checkpoint,
+        _normalize_method_name,
+    )
+
+    ar_online_mxfp8 = (
+        current_omni_platform.is_npu()
+        and _normalize_method_name(filtered_engine_args_dict.get("quantization")) == "mxfp8"
+        and not _is_mxfp8_prequantized_checkpoint(omni_engine_args.model)
+    )
+    ar_stashed_quant = None
+    if ar_online_mxfp8:
+        ar_stashed_quant = omni_engine_args.quantization
+        omni_engine_args.quantization = None
+        if getattr(omni_engine_args, "quantization_config", None) is not None:
+            omni_engine_args.quantization_config = None
+        logger.info(
+            "[stage_init] NPU AR online MXFP8: stashed native quantization=%s; "
+            "will inject DiffusionMXFP8Config after create_engine_config.",
+            ar_stashed_quant,
+        )
+
     vllm_config = omni_engine_args.create_engine_config(
         usage_context=UsageContext.LLM_CLASS,
         headless=headless,
     )
     executor_class = Executor.get_class(vllm_config)
+
+    if ar_online_mxfp8 and ar_stashed_quant is not None:
+        from vllm_omni.quantization.factory import build_quant_config
+
+        vllm_config = replace(vllm_config, quant_config=build_quant_config("mxfp8"))
+        logger.info(
+            "[stage_init] NPU AR online MXFP8: injected DiffusionMXFP8Config "
+            "(is_checkpoint_mxfp8_serialized=False) into vllm_config.quant_config."
+        )
 
     # Upgrade vanilla INCConfig to OmniINCConfig for multi-stage models.
     upgraded = OmniINCConfig.maybe_upgrade(vllm_config.quant_config)

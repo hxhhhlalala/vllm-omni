@@ -162,6 +162,20 @@ class _LazyWeightMixin:
 
     uses_meta_device: bool = True
 
+    def _lazy_scale_param_names(self) -> tuple[str, ...]:
+        """Scale parameter names that ``process_weights_after_loading`` will
+        ``replace_parameter()`` into. Online subclasses override this.
+
+        The placeholder only needs to *exist* so that ``replace_parameter``'s
+        ``getattr(mod, name)`` succeeds; it is discarded via the
+        ``register_parameter`` fallback (dtype/nbytes differ). The reason this
+        is needed at all is MRO: online methods inherit ``_LazyWeightMixin``
+        *before* their offline sibling, so this ``create_weights`` (which
+        registers only ``weight``) shadows the offline ``create_weights`` that
+        would otherwise register the real scale params.
+        """
+        return ()
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -218,6 +232,17 @@ class _LazyWeightMixin:
         )
         layer._load_device = torch.get_default_device()
         layer.register_parameter("weight", weight)
+
+        # Pre-register scale placeholders so that process_weights_after_loading
+        # can replace_parameter() them (see _lazy_scale_param_names docstring).
+        for name in self._lazy_scale_param_names():
+            layer.register_parameter(
+                name,
+                torch.nn.Parameter(
+                    torch.empty(1, device="meta", dtype=params_dtype),
+                    requires_grad=False,
+                ),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +453,9 @@ class NPUMxfp8OnlineLinearMethod(_LazyWeightMixin, NPUMxfp8LinearMethod):
       process_weights  : NPUMxfp8OnlineLinearMethod  (BF16 → FP8 + normalize)
       apply / ops      : NPUMxfp8LinearMethod / MXFPLinearMethodBase  (shared)
     """
+
+    def _lazy_scale_param_names(self) -> tuple[str, ...]:
+        return ("weight_scale",)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

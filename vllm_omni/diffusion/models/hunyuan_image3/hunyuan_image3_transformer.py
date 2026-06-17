@@ -1594,11 +1594,15 @@ class HunYuanSparseMoeBlock(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = 0
 
+        # Router gate stays BF16: quantizing it diverges from the HF reference
+        # and is precision-sensitive. Aligns with the AR side (hunyuan_image3.py
+        # builds its gate with quant_config=None) and keeps the gate off the
+        # online MXFP8 weight_scale path entirely.
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
         if config.use_mixed_mlp_moe > 0:

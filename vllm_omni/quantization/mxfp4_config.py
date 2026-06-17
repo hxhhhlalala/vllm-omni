@@ -303,6 +303,9 @@ class NPUMxfp4OnlineLinearMethod(_LazyWeightMixin, NPUMxfp4LinearMethod):
       apply / ops     : NPUMxfp4LinearMethod / MXFPLinearMethodBase (shared)
     """
 
+    def _lazy_scale_param_names(self) -> tuple[str, ...]:
+        return ("weight_scale",)
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -529,6 +532,9 @@ class NPUMxfp4DualScaleOnlineLinearMethod(_LazyWeightMixin, NPUMxfp4DualScaleLin
       process_weights       : NPUMxfp4DualScaleOnlineLinearMethod (BF16 → FP4 + dual scales)
       apply / _quant_matmul : NPUMxfp4DualScaleLinearMethod (shared with offline path)
     """
+
+    def _lazy_scale_param_names(self) -> tuple[str, ...]:
+        return ("weight_scale", "weight_dual_scale", "mul_scale")
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

@@ -468,3 +468,29 @@ def resolve_quant_config_from_disk(
         return build_quant_config(qc_method, **qc_kwargs)
 
     return quant_config
+
+
+def _is_mxfp8_prequantized_checkpoint(model_path: str) -> bool:
+    """True when the model's config.json declares a serialized NPU/ascend
+    mxfp8 checkpoint (``is_checkpoint_mxfp8_serialized=True``) that must use
+    the offline load path rather than online (BF16) quantization at load time.
+    """
+    import json
+    import os
+
+    if not model_path or not os.path.isdir(model_path):
+        return False
+    cfg_path = os.path.join(model_path, "config.json")
+    if not os.path.isfile(cfg_path):
+        return False
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            qc = json.load(f).get("quantization_config")
+    except (OSError, ValueError):
+        return False
+    if not isinstance(qc, dict):
+        return False
+    method = _normalize_method_name(qc.get("quant_method") or qc.get("method"))
+    if method != "mxfp8":
+        return False
+    return bool(qc.get("is_checkpoint_mxfp8_serialized"))
